@@ -1,0 +1,36 @@
+# ----------- Build Stage -----------
+FROM golang:1.24-bookworm AS builder
+
+ARG VERSION=dev
+WORKDIR /app
+
+# 复制 go.mod 和 go.sum 以下载依赖
+COPY go.mod go.sum ./
+RUN go mod download
+
+# 复制代码
+COPY . .
+
+# 静态编译 headscale，确保无 cgo 依赖，指定 GOOS GOARCH
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath \
+    -ldflags="-s -w -X github.com/juanfont/headscale/cmd/headscale/cli.Version=${VERSION}" \
+    -o /app/headscale ./cmd/headscale
+
+# 检查二进制依赖（构建阶段调试用，可删）
+RUN ldd /app/headscale || true
+
+# ----------- Run Stage -----------
+FROM alpine:3.14
+
+# 安装运行时依赖: sqlite、证书和网络工具（如果需要，按实际需求调整）
+RUN apk add --no-cache sqlite ca-certificates
+
+WORKDIR /app
+
+# 复制编译好的二进制文件
+COPY --from=builder /app/headscale .
+
+EXPOSE 8080
+
+CMD ["./headscale"]
+

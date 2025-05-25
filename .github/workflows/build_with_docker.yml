@@ -20,19 +20,20 @@ jobs:
           echo "FILE_DATE=$(date +'%Y%m%d%H%M%S')" >> $GITHUB_ENV
           docker build \
             --network host \
-            --tag zerotier-planet-build:latest \
+            --tag headscale-build:latest \
             --build-arg TAG=main \
+            -f Dockerfile.build \
             .
 
       - name: Save Docker image
         run: |
-          docker save zerotier-planet-build:latest \
-            | gzip > $GITHUB_WORKSPACE/zerotier-planet-build.tar.gz
+          docker save headscale-build:latest \
+            | gzip > $GITHUB_WORKSPACE/headscale-build.tar.gz
 
       - name: Upload Docker image artifact
         uses: actions/upload-artifact@master
         if: ${{ ! cancelled() }}
         with:
-          name: ${{ env.FILE_DATE }}zerotier-planet-build.tar.gz
-          path: zerotier-planet-build.tar.gz
+          name: ${{ env.FILE_DATE }}headscale-build.tar.gz
+          path: headscale-build.tar.gz
 
