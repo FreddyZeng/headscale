@@ -1,0 +1,38 @@
+name: build_with_docker
+
+on:
+  push:
+    branches:
+      - master     # 当 master 分支有推送时触发
+  schedule:
+    - cron: '0 */6 * * *'  # 每6小时检查一次
+  workflow_dispatch:      # 允许手动触发
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Build Docker image
+        run: |
+          echo "FILE_DATE=$(date +'%Y%m%d%H%M%S')" >> $GITHUB_ENV
+          docker build \
+            --network host \
+            --tag zerotier-planet-build:latest \
+            --build-arg TAG=main \
+            .
+
+      - name: Save Docker image
+        run: |
+          docker save zerotier-planet-build:latest \
+            | gzip > $GITHUB_WORKSPACE/zerotier-planet-build.tar.gz
+
+      - name: Upload Docker image artifact
+        uses: actions/upload-artifact@master
+        if: ${{ ! cancelled() }}
+        with:
+          name: ${{ env.FILE_DATE }}zerotier-planet-build.tar.gz
+          path: zerotier-planet-build.tar.gz
+
