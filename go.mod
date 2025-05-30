@@ -57,7 +57,7 @@ require (
 	zombiezen.com/go/postgrestest v1.0.1
 )
 
-replace tailscale.com => github.com/FreddyZeng/tailscale-1.82.5 main
+replace tailscale.com => github.com/FreddyZeng/tailscale-1.82.5 v0.0.0-20250530092000-d0b12bef2482
 
 // NOTE: modernc sqlite has a fragile dependency
 // chain and it is important that they are updated
