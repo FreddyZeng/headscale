@@ -52,12 +52,12 @@ require (
 	gopkg.in/yaml.v3 v3.0.1
 	gorm.io/driver/postgres v1.5.11
 	gorm.io/gorm v1.25.12
-	tailscale.com v1.82.5
+	tailscale.com v1.82.5-20250530175520-1ac5fdef7f8d
 	zgo.at/zcache/v2 v2.1.0
 	zombiezen.com/go/postgrestest v1.0.1
 )
 
-replace tailscale.com => github.com/FreddyZeng/tailscale-1.82.5 main
+replace tailscale.com => github.com/FreddyZeng/tailscale-1.82.5 v0.0.0-20250530175520-1ac5fdef7f8d
 
 // NOTE: modernc sqlite has a fragile dependency
 // chain and it is important that they are updated
