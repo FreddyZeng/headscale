@@ -1,0 +1,36 @@
+name: build_with_docker
+
+on:
+  push:
+    branches:
+      - current     # 当 master 分支有推送时触发
+  workflow_dispatch:      # 允许手动触发
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Build Docker image
+        run: |
+          echo "FILE_DATE=$(date +'%Y%m%d%H%M%S')" >> $GITHUB_ENV
+          docker build \
+            --network host \
+            --tag headscale-build:latest \
+            --build-arg TAG=main \
+            -f Dockerfile.build \
+            .
+
+      - name: Save Docker image
+        run: |
+          docker save headscale-build:latest \
+            | gzip > $GITHUB_WORKSPACE/headscale-build.tar.gz
+
+      - name: Upload Docker image artifact
+        uses: actions/upload-artifact@master
+        if: ${{ ! cancelled() }}
+        with:
+          name: ${{ env.FILE_DATE }}headscale-build.tar.gz
+          path: headscale-build.tar.gz
