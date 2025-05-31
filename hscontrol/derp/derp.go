@@ -49,7 +49,7 @@ func loadDERPMapFromPath(path string) (*tailcfg.DERPMap, error) {
 	return &derpMap, err
 }
 
-func loadDERPMapFromURL(addr url.URL) (*tailcfg.DERPMap, error) {
+func loadDERPMapFromURL(addr url.URL, customNodes []*tailcfg.DERPNode) (*tailcfg.DERPMap, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), types.HTTPTimeout)
 	defer cancel()
 
@@ -92,6 +92,14 @@ func loadDERPMapFromURL(addr url.URL) (*tailcfg.DERPMap, error) {
                 node.STUNOnly = true
                 node.IsCustomDERPNode = false
             }
+            
+            // add custom nodes
+            for _, customNode := range customNodes {
+				newNode := *customNode // 复制值
+				newNode.RegionID = region.RegionID
+				newNode.IsCustomDERPNode = true
+				region.Nodes = append(region.Nodes, &newNode)
+			}
         }
     }
 
@@ -120,6 +128,9 @@ func mergeDERPMaps(derpMaps []*tailcfg.DERPMap) *tailcfg.DERPMap {
 
 func GetDERPMap(cfg types.DERPConfig) *tailcfg.DERPMap {
 	var derpMaps []*tailcfg.DERPMap
+	
+	var customNodes []*tailcfg.DERPNode
+	
 	if cfg.DERPMap != nil {
 		derpMaps = append(derpMaps, cfg.DERPMap)
 	}
@@ -139,12 +150,28 @@ func GetDERPMap(cfg types.DERPConfig) *tailcfg.DERPMap {
 
 			break
 		}
+		
+		if derpMap.Regions != nil {
+			for _, region := range derpMap.Regions {
+				if region == nil {
+					continue
+				}
+
+				for _, node := range region.Nodes {
+					if node == nil {
+						continue
+					}
+					
+					customNodes = append(customNodes, node)
+				}
+			}
+		}
 
 		derpMaps = append(derpMaps, derpMap)
 	}
 
 	for _, addr := range cfg.URLs {
-		derpMap, err := loadDERPMapFromURL(addr)
+		derpMap, err := loadDERPMapFromURL(addr, customNodes)
 		log.Debug().
 			Str("func", "GetDERPMap").
 			Str("url", addr.String()).
