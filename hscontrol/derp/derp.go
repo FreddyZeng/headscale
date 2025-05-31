@@ -32,11 +32,16 @@ func loadDERPMapFromPath(path string) (*tailcfg.DERPMap, error) {
             if region == nil {
                 continue
             }
+
+            region.IsCustomDERPRegion = true
+            region.IsConfigTailScaleDERPNodeAllSTUNOnly = false
+
             for _, node := range region.Nodes {
                 if node == nil {
                     continue
                 }
                 
+                node.IsCustomDERPNode = true
             }
         }
     }
@@ -70,6 +75,25 @@ func loadDERPMapFromURL(addr url.URL) (*tailcfg.DERPMap, error) {
 
 	var derpMap tailcfg.DERPMap
 	err = json.Unmarshal(body, &derpMap)
+
+    if derpMap.Regions != nil {
+        for _, region := range derpMap.Regions {
+            if region == nil {
+                continue
+            }
+
+            region.IsCustomDERPRegion = false
+            region.IsConfigTailScaleDERPNodeAllSTUNOnly = true
+
+            for _, node := range region.Nodes {
+                if node == nil {
+                    continue
+                }
+                
+                node.IsCustomDERPNode = false
+            }
+        }
+    }
 
 	return &derpMap, err
 }
