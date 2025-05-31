@@ -26,6 +26,20 @@ func loadDERPMapFromPath(path string) (*tailcfg.DERPMap, error) {
 		return nil, err
 	}
 	err = yaml.Unmarshal(b, &derpMap)
+    
+    if derpMap.Regions != nil {
+        for _, region := range derpMap.Regions {
+            if region == nil {
+                continue
+            }
+            for _, node := range region.Nodes {
+                if node == nil {
+                    continue
+                }
+                
+            }
+        }
+    }
 
 	return &derpMap, err
 }
