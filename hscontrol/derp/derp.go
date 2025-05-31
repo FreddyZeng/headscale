@@ -89,7 +89,7 @@ func loadDERPMapFromURL(addr url.URL) (*tailcfg.DERPMap, error) {
                 if node == nil {
                     continue
                 }
-                
+                node.STUNOnly = true
                 node.IsCustomDERPNode = false
             }
         }
