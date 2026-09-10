@@ -1,4 +1,4 @@
-![headscale logo](./docs/logo/headscale3_header_stacked_left.png)
+![headscale logo](./docs/assets/logo/headscale3_header_stacked_left.png)
 
 ![ci](https://github.com/juanfont/headscale/actions/workflows/test.yml/badge.svg)
 
@@ -11,8 +11,8 @@ to ensure you have the correct example configuration. The `main` branch might
 contain unreleased changes. The documentation is available for stable and
 development versions:
 
-* [Documentation for the stable version](https://headscale.net/stable/)
-* [Documentation for the development version](https://headscale.net/development/)
+- [Documentation for the stable version](https://headscale.net/stable/)
+- [Documentation for the development version](https://headscale.net/development/)
 
 ## What is Tailscale
 
@@ -30,8 +30,8 @@ nodes in the Tailscale network. It assigns the IP addresses of the clients,
 creates the boundaries between each user, enables sharing machines between users,
 and exposes the advertised routes of your nodes.
 
-A [Tailscale network (tailnet)](https://tailscale.com/kb/1136/tailnet/) is private
-network which Tailscale assigns to a user in terms of private users or an
+A [Tailscale network (tailnet)](https://tailscale.com/docs/concepts/tailnet) is
+private network which Tailscale assigns to a user in terms of private users or an
 organisation.
 
 ## Design goal
@@ -63,8 +63,18 @@ and container to run Headscale.**
 
 Please have a look at the [`documentation`](https://headscale.net/stable/).
 
+For NixOS users, a module is available in [`nix/`](./nix/).
+
+## Builds from `main`
+
+Development builds from the `main` branch are available as container images and
+binaries. See the [development builds](https://headscale.net/stable/setup/install/main/)
+documentation for details.
+
 ## Talks
 
+- Fosdem 2026 (video): [Headscale & Tailscale: The complementary open source clone](https://fosdem.org/2026/schedule/event/KYQ3LL-headscale-the-complementary-open-source-clone/)
+  - presented by Kristoffer Dalby
 - Fosdem 2023 (video): [Headscale: How we are using integration testing to reimplement Tailscale](https://fosdem.org/2023/schedule/event/goheadscale/)
   - presented by Juan Font Alonso and Kristoffer Dalby
 
@@ -79,6 +89,8 @@ The maintainers work together on setting the direction for the project. The unde
 ## Contributing
 
 Please read the [CONTRIBUTING.md](./CONTRIBUTING.md) file.
+
+Have also a look at our [AI_POLICY.md](./AI_POLICY.md).
 
 ### Requirements
 
@@ -102,6 +114,8 @@ run `make lint` and `make fmt` before committing any code.
 
 The **Proto** code is linted with [`buf`](https://docs.buf.build/lint/overview) and
 formatted with [`clang-format`](https://clang.llvm.org/docs/ClangFormat.html).
+
+The **docs** are formatted with [`mdformat`](https://mdformat.readthedocs.io).
 
 The **rest** (Markdown, YAML, etc) is formatted with [`prettier`](https://prettier.io).
 
@@ -139,14 +153,29 @@ make test
 To build the program:
 
 ```shell
-nix build
-```
-
-or
-
-```shell
 make build
 ```
+
+### Development workflow
+
+We recommend using Nix for dependency management to ensure you have all required tools. If you prefer to manage dependencies yourself, you can use Make directly:
+
+**With Nix (recommended):**
+
+```shell
+nix develop
+make test
+make build
+```
+
+**With your own dependencies:**
+
+```shell
+make test
+make build
+```
+
+The Makefile will warn you if any required tools are missing and suggest running `nix develop`. Run `make help` to see all available targets.
 
 ## Contributors
 

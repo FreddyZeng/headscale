@@ -10,7 +10,9 @@ import (
 	"tailscale.com/net/tsaddr"
 )
 
-func GrpcSocketDialer(ctx context.Context, addr string) (net.Conn, error) {
+// SocketDialer dials a local unix-domain socket, letting the HTTP CLI client
+// reach the headscale API over its unix socket.
+func SocketDialer(ctx context.Context, addr string) (net.Conn, error) {
 	var d net.Dialer
 
 	return d.DialContext(ctx, "unix", addr)
@@ -26,16 +28,15 @@ func PrefixesToString(prefixes []netip.Prefix) []string {
 }
 
 func MustStringsToPrefixes(strings []string) []netip.Prefix {
-	ret := make([]netip.Prefix, 0, len(strings))
-	for _, str := range strings {
-		prefix := netip.MustParsePrefix(str)
-		ret = append(ret, prefix)
+	prefixes, err := StringToIPPrefix(strings)
+	if err != nil {
+		panic(err)
 	}
 
-	return ret
+	return prefixes
 }
 
-// TheInternet returns the IPSet for the Internet.
+// TheInternet returns the [netipx.IPSet] for the Internet.
 // https://www.youtube.com/watch?v=iDbyYGrswtg
 var TheInternet = sync.OnceValue(func() *netipx.IPSet {
 	var internetBuilder netipx.IPSetBuilder
@@ -58,5 +59,22 @@ var TheInternet = sync.OnceValue(func() *netipx.IPSet {
 	internetBuilder.RemovePrefix(netip.MustParsePrefix("169.254.0.0/16"))
 
 	theInternetSet, _ := internetBuilder.IPSet()
+
 	return theInternetSet
 })
+
+// IPSetSubsetOf reports whether every prefix of candidate is contained in
+// container. A nil candidate or container returns false.
+func IPSetSubsetOf(candidate, container *netipx.IPSet) bool {
+	if candidate == nil || container == nil {
+		return false
+	}
+
+	for _, pref := range candidate.Prefixes() {
+		if !container.ContainsPrefix(pref) {
+			return false
+		}
+	}
+
+	return true
+}

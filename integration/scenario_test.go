@@ -4,7 +4,9 @@ import (
 	"testing"
 
 	"github.com/juanfont/headscale/integration/dockertestutil"
+	"github.com/juanfont/headscale/integration/hsic"
 	"github.com/juanfont/headscale/integration/tsic"
+	"github.com/stretchr/testify/require"
 )
 
 // This file is intended to "test the test framework", by proxy it will also test
@@ -28,18 +30,18 @@ func IntegrationSkip(t *testing.T) {
 // nolint:tparallel
 func TestHeadscale(t *testing.T) {
 	IntegrationSkip(t)
-	t.Parallel()
 
 	var err error
 
 	user := "test-space"
 
 	scenario, err := NewScenario(ScenarioSpec{})
-	assertNoErr(t, err)
+
+	require.NoError(t, err)
 	defer scenario.ShutdownAssertNoPanics(t)
 
 	t.Run("start-headscale", func(t *testing.T) {
-		headscale, err := scenario.Headscale()
+		headscale, err := scenario.Headscale(hsic.WithTestName("scenariohs"))
 		if err != nil {
 			t.Fatalf("failed to create start headcale: %s", err)
 		}
@@ -75,7 +77,6 @@ func TestHeadscale(t *testing.T) {
 // nolint:tparallel
 func TestTailscaleNodesJoiningHeadcale(t *testing.T) {
 	IntegrationSkip(t)
-	t.Parallel()
 
 	var err error
 
@@ -84,11 +85,12 @@ func TestTailscaleNodesJoiningHeadcale(t *testing.T) {
 	count := 1
 
 	scenario, err := NewScenario(ScenarioSpec{})
-	assertNoErr(t, err)
+
+	require.NoError(t, err)
 	defer scenario.ShutdownAssertNoPanics(t)
 
 	t.Run("start-headscale", func(t *testing.T) {
-		headscale, err := scenario.Headscale()
+		headscale, err := scenario.Headscale(hsic.WithTestName("scenariojoin"))
 		if err != nil {
 			t.Fatalf("failed to create start headcale: %s", err)
 		}
@@ -135,7 +137,7 @@ func TestTailscaleNodesJoiningHeadcale(t *testing.T) {
 		err = scenario.RunTailscaleUp(
 			user,
 			headscale.GetEndpoint(),
-			key.GetKey(),
+			key.Key,
 		)
 		if err != nil {
 			t.Fatalf("failed to login: %s", err)

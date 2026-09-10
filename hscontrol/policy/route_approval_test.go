@@ -9,14 +9,13 @@ import (
 	"github.com/juanfont/headscale/hscontrol/types"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"gorm.io/gorm"
 )
 
 func TestNodeCanApproveRoute(t *testing.T) {
 	users := []types.User{
-		{Name: "user1", Model: gorm.Model{ID: 1}},
-		{Name: "user2", Model: gorm.Model{ID: 2}},
-		{Name: "user3", Model: gorm.Model{ID: 3}},
+		{Name: "user1", ID: 1},
+		{Name: "user2", ID: 2},
+		{Name: "user3", ID: 3},
 	}
 
 	// Create standard node setups used across tests
@@ -24,34 +23,34 @@ func TestNodeCanApproveRoute(t *testing.T) {
 		ID:       1,
 		Hostname: "user1-device",
 		IPv4:     ap("100.64.0.1"),
-		UserID:   1,
-		User:     users[0],
+		UserID:   new(uint(1)),
+		User:     new(users[0]),
 	}
 
 	exitNode := types.Node{
 		ID:       2,
 		Hostname: "user2-device",
 		IPv4:     ap("100.64.0.2"),
-		UserID:   2,
-		User:     users[1],
+		UserID:   new(uint(2)),
+		User:     new(users[1]),
 	}
 
 	taggedNode := types.Node{
-		ID:         3,
-		Hostname:   "tagged-server",
-		IPv4:       ap("100.64.0.3"),
-		UserID:     3,
-		User:       users[2],
-		ForcedTags: []string{"tag:router"},
+		ID:       3,
+		Hostname: "tagged-server",
+		IPv4:     ap("100.64.0.3"),
+		UserID:   new(uint(3)),
+		User:     new(users[2]),
+		Tags:     []string{"tag:router"},
 	}
 
 	multiTagNode := types.Node{
-		ID:         4,
-		Hostname:   "multi-tag-node",
-		IPv4:       ap("100.64.0.4"),
-		UserID:     2,
-		User:       users[1],
-		ForcedTags: []string{"tag:router", "tag:server"},
+		ID:       4,
+		Hostname: "multi-tag-node",
+		IPv4:     ap("100.64.0.4"),
+		UserID:   new(uint(2)),
+		User:     new(users[1]),
+		Tags:     []string{"tag:router", "tag:server"},
 	}
 
 	tests := []struct {
@@ -748,6 +747,32 @@ func TestNodeCanApproveRoute(t *testing.T) {
 			canApprove: true,
 		},
 		{
+			// Tags-as-identity: Tagged nodes are identified by their tags, not by the
+			// user who created them. Group membership of the creator is irrelevant.
+			// A tagged node can only be auto-approved via tag-based autoApprovers,
+			// not group-based ones (even if the creator is in the group).
+			name:  "tagged-node-with-group-autoapprover-not-approved",
+			node:  taggedNode, // Has tag:router, owned by user3
+			route: p("10.30.0.0/16"),
+			policy: `{
+				"tagOwners": {
+					"tag:router": ["user3@"]
+				},
+				"groups": {
+					"group:ops": ["user3@"]
+				},
+				"acls": [
+					{"action": "accept", "src": ["*"], "dst": ["*:*"]}
+				],
+				"autoApprovers": {
+					"routes": {
+						"10.30.0.0/16": ["group:ops"]
+					}
+				}
+			}`,
+			canApprove: false, // Tagged nodes don't inherit group membership for auto-approval
+		},
+		{
 			name:  "small-subnet-with-exitnode-only-approval",
 			node:  normalNode,
 			route: p("192.168.1.1/32"),
@@ -771,15 +796,39 @@ func TestNodeCanApproveRoute(t *testing.T) {
 			policy:     `{"acls":[{"action":"accept","src":["*"],"dst":["*:*"]}]}`,
 			canApprove: false,
 		},
+		{
+			name:  "policy-without-autoApprovers-section",
+			node:  normalNode,
+			route: p("10.33.0.0/16"),
+			policy: `{
+				"groups": {
+					"group:admin": ["user1@"]
+				},
+				"acls": [
+					{
+						"action": "accept",
+						"src": ["group:admin"],
+						"dst": ["group:admin:*"]
+					},
+					{
+						"action": "accept",
+						"src": ["group:admin"],
+						"dst": ["10.33.0.0/16:*"]
+					}
+				]
+			}`,
+			canApprove: false,
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			// Initialize all policy manager implementations
-			policyManagers, err := PolicyManagersForTest([]byte(tt.policy), users, types.Nodes{&tt.node})
+			policyManagers, err := PolicyManagersForTest([]byte(tt.policy), users, types.Nodes{&tt.node}.ViewSlice())
 			if tt.name == "empty policy" {
 				// We expect this one to have a valid but empty policy
 				require.NoError(t, err)
+
 				if err != nil {
 					return
 				}
@@ -789,11 +838,12 @@ func TestNodeCanApproveRoute(t *testing.T) {
 
 			for i, pm := range policyManagers {
 				t.Run(fmt.Sprintf("policy-index%d", i), func(t *testing.T) {
-					result := pm.NodeCanApproveRoute(&tt.node, tt.route)
+					result := pm.NodeCanApproveRoute(tt.node.View(), tt.route)
 
 					if diff := cmp.Diff(tt.canApprove, result); diff != "" {
 						t.Errorf("NodeCanApproveRoute() mismatch (-want +got):\n%s", diff)
 					}
+
 					assert.Equal(t, tt.canApprove, result, "Unexpected route approval result")
 				})
 			}

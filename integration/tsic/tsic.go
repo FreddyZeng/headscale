@@ -14,10 +14,12 @@ import (
 	"os"
 	"reflect"
 	"runtime/debug"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/cenkalti/backoff/v5"
 	"github.com/juanfont/headscale/hscontrol/types"
 	"github.com/juanfont/headscale/hscontrol/util"
 	"github.com/juanfont/headscale/integration/dockertestutil"
@@ -26,18 +28,35 @@ import (
 	"github.com/ory/dockertest/v3/docker"
 	"tailscale.com/ipn"
 	"tailscale.com/ipn/ipnstate"
+	"tailscale.com/ipn/store/mem"
 	"tailscale.com/net/netcheck"
+	"tailscale.com/paths"
+	"tailscale.com/types/key"
 	"tailscale.com/types/netmap"
+	"tailscale.com/util/multierr"
+	"tailscale.com/util/rands"
+	"tailscale.com/wgengine/filter"
 )
 
 const (
 	tsicHashLength       = 6
-	defaultPingTimeout   = 300 * time.Millisecond
-	defaultPingCount     = 10
+	defaultPingCount     = 5
 	dockerContextPath    = "../."
 	caCertRoot           = "/usr/local/share/ca-certificates"
 	dockerExecuteTimeout = 60 * time.Second
+	tailscaleBin         = "tailscale"
 )
+
+// defaultPingTimeoutVal returns the per-attempt timeout for tailscale ping.
+// On CI, the docker exec overhead is higher so the timeout is doubled,
+// which also doubles the docker exec timeout (timeout * count).
+func defaultPingTimeoutVal() time.Duration {
+	if util.IsCI() {
+		return 400 * time.Millisecond
+	}
+
+	return 200 * time.Millisecond
+}
 
 var (
 	errTailscalePingFailed             = errors.New("ping failed")
@@ -45,9 +64,12 @@ var (
 	errTailscaleNotLoggedIn            = errors.New("tailscale not logged in")
 	errTailscaleWrongPeerCount         = errors.New("wrong peer count")
 	errTailscaleCannotUpWithoutAuthkey = errors.New("cannot up without authkey")
-	errTailscaleNotConnected           = errors.New("tailscale not connected")
-	errTailscaledNotReadyForLogin      = errors.New("tailscaled not ready for login")
 	errInvalidClientConfig             = errors.New("verifiably invalid client config requested")
+	errInvalidTailscaleImageFormat     = errors.New("invalid HEADSCALE_INTEGRATION_TAILSCALE_IMAGE format, expected repository:tag")
+	errTailscaleImageRequiredInCI      = errors.New("HEADSCALE_INTEGRATION_TAILSCALE_IMAGE must be set in CI for HEAD version")
+	errContainerNotInitialized         = errors.New("container not initialized")
+	errFQDNNotYetAvailable             = errors.New("FQDN not yet available")
+	errCurlEmptyResponseBody           = errors.New("curl returned empty response body")
 )
 
 const (
@@ -76,6 +98,7 @@ type TailscaleInContainer struct {
 	caCerts           [][]byte
 	headscaleHostname string
 	withWebsocketDERP bool
+	withDERPOverHTTP  bool
 	withSSH           bool
 	withTags          []string
 	withEntrypoint    []string
@@ -84,6 +107,9 @@ type TailscaleInContainer struct {
 	netfilter         string
 	extraLoginArgs    []string
 	withAcceptRoutes  bool
+	withPackages      []string // Alpine packages to install at container start
+	withWebserverPort int      // Port for built-in HTTP server (0 = disabled)
+	withExtraCommands []string // Extra shell commands to run before tailscaled
 
 	// build options, solely for HEAD
 	buildConfig TailscaleInContainerBuildConfig
@@ -104,7 +130,7 @@ func WithCACert(cert []byte) Option {
 	}
 }
 
-// WithNetwork sets the Docker container network to use with
+// WithNetwork sets the Docker [dockertest.Network] to use with
 // the Tailscale instance.
 func WithNetwork(network *dockertest.Network) Option {
 	return func(tsic *TailscaleInContainer) {
@@ -132,6 +158,18 @@ func WithTags(tags []string) Option {
 func WithWebsocketDERP(enabled bool) Option {
 	return func(tsic *TailscaleInContainer) {
 		tsic.withWebsocketDERP = enabled
+	}
+}
+
+// WithDERPOverHTTP makes the client reach the DERP server over plain-HTTP
+// websockets (TS_DEBUG_DERP_WS_CLIENT + TS_DEBUG_USE_DERP_HTTP). It is the
+// counterpart to [hsic.WithoutTLS]: a Headscale serving its embedded DERP without
+// TLS is otherwise unreachable, because the client defaults to dialing DERP over
+// HTTPS.
+func WithDERPOverHTTP() Option {
+	return func(tsic *TailscaleInContainer) {
+		tsic.withWebsocketDERP = true
+		tsic.withDERPOverHTTP = true
 	}
 }
 
@@ -192,52 +230,140 @@ func WithBuildTag(tag string) Option {
 }
 
 // WithExtraLoginArgs adds additional arguments to the `tailscale up` command
-// as part of the Login function.
+// as part of the [TailscaleInContainer.Login] function.
 func WithExtraLoginArgs(args []string) Option {
 	return func(tsic *TailscaleInContainer) {
 		tsic.extraLoginArgs = append(tsic.extraLoginArgs, args...)
 	}
 }
 
-// WithAcceptRoutes tells the node to accept incomming routes.
+// WithAcceptRoutes tells the node to accept incoming routes.
 func WithAcceptRoutes() Option {
 	return func(tsic *TailscaleInContainer) {
 		tsic.withAcceptRoutes = true
 	}
 }
 
+// WithPackages specifies Alpine packages to install when the container starts.
+// This requires internet access and uses `apk add`. Common packages:
+// - "python3" for HTTP server
+// - "curl" for HTTP client
+// - "bind-tools" for dig command
+// - "iptables", "ip6tables" for firewall rules
+// Note: Tests using this option require internet access and cannot use
+// the built-in DERP server in offline mode.
+func WithPackages(packages ...string) Option {
+	return func(tsic *TailscaleInContainer) {
+		tsic.withPackages = append(tsic.withPackages, packages...)
+	}
+}
+
+// WithWebserver starts a Python HTTP server on the specified port
+// alongside tailscaled. This is useful for testing subnet routing
+// and ACL connectivity. Automatically adds "python3" to packages if needed.
+// The server serves files from the root directory (/).
+func WithWebserver(port int) Option {
+	return func(tsic *TailscaleInContainer) {
+		tsic.withWebserverPort = port
+	}
+}
+
+// WithExtraCommands adds extra shell commands to run before tailscaled starts.
+// Commands are run after package installation and CA certificate updates.
+func WithExtraCommands(commands ...string) Option {
+	return func(tsic *TailscaleInContainer) {
+		tsic.withExtraCommands = append(tsic.withExtraCommands, commands...)
+	}
+}
+
+// buildEntrypoint constructs the container entrypoint command based on
+// configured options (packages, webserver, etc.).
+func (t *TailscaleInContainer) buildEntrypoint() []string {
+	var commands []string
+
+	// Wait for network to be ready
+	commands = append(commands, "while ! ip route show default >/dev/null 2>&1; do sleep 0.1; done")
+
+	// If CA certs are configured, wait for them to be written by the Go code
+	// (certs are written after container start via [TailscaleInContainer.WriteFile])
+	if len(t.caCerts) > 0 {
+		commands = append(commands,
+			fmt.Sprintf("while [ ! -f %s/user-0.crt ]; do sleep 0.1; done", caCertRoot))
+	}
+
+	// Install packages if requested (requires internet access)
+	packages := t.withPackages
+	if t.withWebserverPort > 0 && !slices.Contains(packages, "python3") {
+		packages = append(packages, "python3")
+	}
+
+	if len(packages) > 0 {
+		commands = append(commands, "apk add --no-cache "+strings.Join(packages, " "))
+	}
+
+	// Update CA certificates
+	commands = append(commands, "update-ca-certificates")
+
+	// Run extra commands if any
+	commands = append(commands, t.withExtraCommands...)
+
+	// Start webserver in background if requested
+	// Use subshell to avoid & interfering with command joining
+	if t.withWebserverPort > 0 {
+		commands = append(commands,
+			fmt.Sprintf("(python3 -m http.server --bind :: %d &)", t.withWebserverPort))
+	}
+
+	// Start tailscaled (must be last as it's the foreground process)
+	commands = append(commands, "tailscaled --tun=tsdev --verbose=10")
+
+	return []string{"/bin/sh", "-c", strings.Join(commands, " ; ")}
+}
+
 // New returns a new TailscaleInContainer instance.
+//
+//nolint:gocyclo // complex container setup with many options
 func New(
 	pool *dockertest.Pool,
 	version string,
 	opts ...Option,
 ) (*TailscaleInContainer, error) {
-	hash, err := util.GenerateRandomStringDNSSafe(tsicHashLength)
-	if err != nil {
-		return nil, err
-	}
+	hash := rands.HexString(tsicHashLength)
 
-	hostname := fmt.Sprintf("ts-%s-%s", strings.ReplaceAll(version, ".", "-"), hash)
+	var err error
+
+	// Include run ID in hostname for easier identification of which test run owns this container
+	runID := dockertestutil.GetIntegrationRunID()
+
+	var hostname string
+
+	if runID != "" {
+		// Use last 6 chars of run ID (the random hash part) for brevity
+		runIDShort := runID[len(runID)-6:]
+		hostname = fmt.Sprintf("ts-%s-%s-%s", runIDShort, strings.ReplaceAll(version, ".", "-"), hash)
+	} else {
+		hostname = fmt.Sprintf("ts-%s-%s", strings.ReplaceAll(version, ".", "-"), hash)
+	}
 
 	tsic := &TailscaleInContainer{
 		version:  version,
 		hostname: hostname,
 
 		pool: pool,
-
-		withEntrypoint: []string{
-			"/bin/sh",
-			"-c",
-			"/bin/sleep 3 ; update-ca-certificates ; tailscaled --tun=tsdev --verbose=10",
-		},
 	}
 
 	for _, opt := range opts {
 		opt(tsic)
 	}
 
+	// Build the entrypoint command dynamically based on options.
+	// Only build if no custom entrypoint was provided via WithDockerEntrypoint.
+	if len(tsic.withEntrypoint) == 0 {
+		tsic.withEntrypoint = tsic.buildEntrypoint()
+	}
+
 	if tsic.network == nil {
-		return nil, fmt.Errorf("no network set, called from: \n%s", string(debug.Stack()))
+		return nil, fmt.Errorf("no network set, called from: \n%s", string(debug.Stack())) //nolint:err113
 	}
 
 	tailscaleOptions := &dockertest.RunOptions{
@@ -259,6 +385,12 @@ func New(
 			tailscaleOptions.Env,
 			fmt.Sprintf("TS_DEBUG_DERP_WS_CLIENT=%t", tsic.withWebsocketDERP),
 		)
+
+		// Plain-HTTP DERP additionally needs the client to dial http:// instead of
+		// the default https://; see [WithDERPOverHTTP].
+		if tsic.withDERPOverHTTP {
+			tailscaleOptions.Env = append(tailscaleOptions.Env, "TS_DEBUG_USE_DERP_HTTP=true")
+		}
 	}
 
 	tailscaleOptions.ExtraHosts = append(tailscaleOptions.ExtraHosts,
@@ -276,12 +408,16 @@ func New(
 		return nil, err
 	}
 
+	// Add integration test labels if running under hi tool
+	dockertestutil.DockerAddIntegrationLabels(tailscaleOptions, tailscaleBin)
+
 	var container *dockertest.Resource
 
 	if version != VersionHead {
 		// build options are not meaningful with pre-existing images,
 		// let's not lead anyone astray by pretending otherwise.
 		defaultBuildConfig := TailscaleInContainerBuildConfig{}
+
 		hasBuildConfig := !reflect.DeepEqual(defaultBuildConfig, tsic.buildConfig)
 		if hasBuildConfig {
 			return tsic, errInvalidClientConfig
@@ -290,50 +426,163 @@ func New(
 
 	switch version {
 	case VersionHead:
-		buildOptions := &dockertest.BuildOptions{
-			Dockerfile: "Dockerfile.tailscale-HEAD",
-			ContextDir: dockerContextPath,
-			BuildArgs:  []docker.BuildArg{},
+		// Check if a pre-built image is available via environment variable
+		prebuiltImage := os.Getenv("HEADSCALE_INTEGRATION_TAILSCALE_IMAGE")
+
+		// If custom build tags are required (e.g., for websocket DERP), we cannot use
+		// the pre-built image as it won't have the necessary code compiled in.
+		hasBuildTags := len(tsic.buildConfig.tags) > 0
+		if hasBuildTags && prebuiltImage != "" {
+			log.Printf("Ignoring pre-built image %s because custom build tags are required: %v", //nolint:gosec // G706: integration-only log of trusted env value
+				prebuiltImage, tsic.buildConfig.tags)
+			prebuiltImage = ""
 		}
 
-		buildTags := strings.Join(tsic.buildConfig.tags, ",")
-		if len(buildTags) > 0 {
-			buildOptions.BuildArgs = append(
-				buildOptions.BuildArgs,
-				docker.BuildArg{
-					Name:  "BUILD_TAGS",
-					Value: buildTags,
-				},
+		if prebuiltImage != "" {
+			log.Printf("Using pre-built tailscale image: %s", prebuiltImage) //nolint:gosec // G706: integration-only log of trusted env value
+
+			// Parse image into repository and tag
+			repo, tag, ok := strings.Cut(prebuiltImage, ":")
+			if !ok {
+				return nil, errInvalidTailscaleImageFormat
+			}
+
+			tailscaleOptions.Repository = repo
+			tailscaleOptions.Tag = tag
+
+			container, err = pool.RunWithOptions(
+				tailscaleOptions,
+				dockertestutil.DockerRestartPolicy,
+				dockertestutil.DockerAllowLocalIPv6,
+				dockertestutil.DockerAllowNetworkAdministration,
+				dockertestutil.DockerMemoryLimit,
 			)
-		}
+			if err != nil {
+				return nil, fmt.Errorf("running pre-built tailscale container %q: %w", prebuiltImage, err)
+			}
+		} else if util.IsCI() && !hasBuildTags {
+			// In CI, we require a pre-built image unless custom build tags are needed
+			return nil, errTailscaleImageRequiredInCI
+		} else {
+			buildOptions := &dockertest.BuildOptions{
+				Dockerfile: "Dockerfile.tailscale-HEAD",
+				ContextDir: dockerContextPath,
+				BuildArgs:  []docker.BuildArg{},
+			}
 
-		container, err = pool.BuildAndRunWithBuildOptions(
-			buildOptions,
-			tailscaleOptions,
-			dockertestutil.DockerRestartPolicy,
-			dockertestutil.DockerAllowLocalIPv6,
-			dockertestutil.DockerAllowNetworkAdministration,
-		)
+			buildTags := strings.Join(tsic.buildConfig.tags, ",")
+			if len(buildTags) > 0 {
+				buildOptions.BuildArgs = append(
+					buildOptions.BuildArgs,
+					docker.BuildArg{
+						Name:  "BUILD_TAGS",
+						Value: buildTags,
+					},
+				)
+			}
+
+			container, err = pool.BuildAndRunWithBuildOptions(
+				buildOptions,
+				tailscaleOptions,
+				dockertestutil.DockerRestartPolicy,
+				dockertestutil.DockerAllowLocalIPv6,
+				dockertestutil.DockerAllowNetworkAdministration,
+				dockertestutil.DockerMemoryLimit,
+			)
+			if err != nil {
+				// Try to get more detailed build output
+				log.Printf("Docker build failed for %s, attempting to get detailed output...", hostname)
+
+				buildOutput, buildErr := dockertestutil.RunDockerBuildForDiagnostics(dockerContextPath, "Dockerfile.tailscale-HEAD")
+
+				// Show the last 100 lines of build output to avoid overwhelming the logs
+				lines := strings.Split(buildOutput, "\n")
+
+				const maxLines = 100
+
+				startLine := 0
+				if len(lines) > maxLines {
+					startLine = len(lines) - maxLines
+				}
+
+				relevantOutput := strings.Join(lines[startLine:], "\n")
+
+				if buildErr != nil {
+					// The diagnostic build also failed - this is the real error
+					return nil, fmt.Errorf(
+						"%s could not start tailscale container (version: %s): %w\n\nDocker build failed. Last %d lines of output:\n%s",
+						hostname,
+						version,
+						err,
+						maxLines,
+						relevantOutput,
+					)
+				}
+
+				if buildOutput != "" {
+					// Build succeeded on retry but container creation still failed
+					return nil, fmt.Errorf(
+						"%s could not start tailscale container (version: %s): %w\n\nDocker build succeeded on retry, but container creation failed. Last %d lines of build output:\n%s",
+						hostname,
+						version,
+						err,
+						maxLines,
+						relevantOutput,
+					)
+				}
+
+				// No output at all - diagnostic build command may have failed
+				return nil, fmt.Errorf(
+					"%s could not start tailscale container (version: %s): %w\n\nUnable to get diagnostic build output (command may have failed silently)",
+					hostname,
+					version,
+					err,
+				)
+			}
+		}
 	case "unstable":
+		// ghcr.io/tailscale/tailscale:unstable is stale (last updated
+		// 2022); only tailscale/tailscale on Docker Hub publishes
+		// current unstable builds.
 		tailscaleOptions.Repository = "tailscale/tailscale"
 		tailscaleOptions.Tag = version
 
-		container, err = pool.RunWithOptions(
-			tailscaleOptions,
-			dockertestutil.DockerRestartPolicy,
-			dockertestutil.DockerAllowLocalIPv6,
-			dockertestutil.DockerAllowNetworkAdministration,
-		)
-	default:
-		tailscaleOptions.Repository = "tailscale/tailscale"
-		tailscaleOptions.Tag = "v" + version
+		err = dockertestutil.PullWithAuth(pool, tailscaleOptions.Repository+":"+tailscaleOptions.Tag)
+		if err != nil {
+			//nolint:gosec // G706: tag value is from MustTestVersions, not external input
+			log.Printf("Pull failed for %s:%s, error: %v", tailscaleOptions.Repository, tailscaleOptions.Tag, err)
+		}
 
 		container, err = pool.RunWithOptions(
 			tailscaleOptions,
 			dockertestutil.DockerRestartPolicy,
 			dockertestutil.DockerAllowLocalIPv6,
 			dockertestutil.DockerAllowNetworkAdministration,
+			dockertestutil.DockerMemoryLimit,
 		)
+		if err != nil {
+			log.Printf("Docker run failed for %s (unstable), error: %v", hostname, err)
+		}
+	default:
+		tailscaleOptions.Repository = "ghcr.io/tailscale/tailscale"
+		tailscaleOptions.Tag = "v" + version
+
+		err = dockertestutil.PullWithAuth(pool, tailscaleOptions.Repository+":"+tailscaleOptions.Tag)
+		if err != nil {
+			//nolint:gosec // G706: tag value is from MustTestVersions, not external input
+			log.Printf("Pull failed for %s:%s, error: %v", tailscaleOptions.Repository, tailscaleOptions.Tag, err)
+		}
+
+		container, err = pool.RunWithOptions(
+			tailscaleOptions,
+			dockertestutil.DockerRestartPolicy,
+			dockertestutil.DockerAllowLocalIPv6,
+			dockertestutil.DockerAllowNetworkAdministration,
+			dockertestutil.DockerMemoryLimit,
+		)
+		if err != nil {
+			log.Printf("Docker run failed for %s (version: v%s), error: %v", hostname, version, err)
+		}
 	}
 
 	if err != nil {
@@ -344,6 +593,7 @@ func New(
 			err,
 		)
 	}
+
 	log.Printf("Created %s container\n", hostname)
 
 	tsic.container = container
@@ -351,7 +601,7 @@ func New(
 	for i, cert := range tsic.caCerts {
 		err = tsic.WriteFile(fmt.Sprintf("%s/user-%d.crt", caCertRoot, i), cert)
 		if err != nil {
-			return nil, fmt.Errorf("failed to write TLS certificate to container: %w", err)
+			return nil, fmt.Errorf("writing TLS certificate to container: %w", err)
 		}
 	}
 
@@ -363,9 +613,9 @@ func (t *TailscaleInContainer) Shutdown() (string, string, error) {
 	stdoutPath, stderrPath, err := t.SaveLog("/tmp/control")
 	if err != nil {
 		log.Printf(
-			"Failed to save log from %s: %s",
+			"saving log from %s: %s",
 			t.hostname,
-			fmt.Errorf("failed to save log: %w", err),
+			fmt.Errorf("saving log: %w", err),
 		)
 	}
 
@@ -382,7 +632,7 @@ func (t *TailscaleInContainer) Version() string {
 	return t.version
 }
 
-// ID returns the Docker container ID of the TailscaleInContainer
+// ContainerID returns the Docker container ID of the [TailscaleInContainer]
 // instance.
 func (t *TailscaleInContainer) ContainerID() string {
 	return t.container.Container.ID
@@ -403,7 +653,6 @@ func (t *TailscaleInContainer) Execute(
 	if err != nil {
 		// log.Printf("command issued: %s", strings.Join(command, " "))
 		// log.Printf("command stderr: %s\n", stderr)
-
 		if stdout != "" {
 			log.Printf("command stdout: %s\n", stdout)
 		}
@@ -418,7 +667,7 @@ func (t *TailscaleInContainer) Execute(
 	return stdout, stderr, nil
 }
 
-// Retrieve container logs.
+// Logs retrieves the container logs.
 func (t *TailscaleInContainer) Logs(stdout, stderr io.Writer) error {
 	return dockertestutil.WriteLog(
 		t.pool,
@@ -431,7 +680,7 @@ func (t *TailscaleInContainer) buildLoginCommand(
 	loginServer, authKey string,
 ) []string {
 	command := []string{
-		"tailscale",
+		tailscaleBin,
 		"up",
 		"--login-server=" + loginServer,
 		"--hostname=" + t.hostname,
@@ -455,8 +704,9 @@ func (t *TailscaleInContainer) buildLoginCommand(
 	}
 
 	if len(t.withTags) > 0 {
-		command = append(command,
-			fmt.Sprintf(`--advertise-tags=%s`, strings.Join(t.withTags, ",")),
+		command = append(
+			command,
+			"--advertise-tags="+strings.Join(t.withTags, ","),
 		)
 	}
 
@@ -470,7 +720,7 @@ func (t *TailscaleInContainer) Login(
 ) error {
 	command := t.buildLoginCommand(loginServer, authKey)
 
-	if _, _, err := t.Execute(command, dockertestutil.ExecuteCommandTimeout(dockerExecuteTimeout)); err != nil {
+	if _, _, err := t.Execute(command, dockertestutil.ExecuteCommandTimeout(dockerExecuteTimeout)); err != nil { //nolint:noinlineerr
 		return fmt.Errorf(
 			"%s failed to join tailscale client (%s): %w",
 			t.hostname,
@@ -482,11 +732,11 @@ func (t *TailscaleInContainer) Login(
 	return nil
 }
 
-// Up runs the login routine on the given Tailscale instance.
+// LoginWithURL runs the login routine on the given Tailscale instance.
 // This login mechanism uses web + command line flow for authentication.
 func (t *TailscaleInContainer) LoginWithURL(
 	loginServer string,
-) (loginURL *url.URL, err error) {
+) (*url.URL, error) {
 	command := t.buildLoginCommand(loginServer, "")
 
 	stdout, stderr, err := t.Execute(command)
@@ -500,7 +750,7 @@ func (t *TailscaleInContainer) LoginWithURL(
 		}
 	}()
 
-	loginURL, err = util.ParseLoginURLFromCLILogin(stdout + stderr)
+	loginURL, err := util.ParseLoginURLFromCLILogin(stdout + stderr)
 	if err != nil {
 		return nil, err
 	}
@@ -510,27 +760,60 @@ func (t *TailscaleInContainer) LoginWithURL(
 
 // Logout runs the logout routine on the given Tailscale instance.
 func (t *TailscaleInContainer) Logout() error {
-	stdout, stderr, err := t.Execute([]string{"tailscale", "logout"})
+	_, _, err := t.Execute([]string{tailscaleBin, "logout"})
 	if err != nil {
 		return err
 	}
 
-	stdout, stderr, _ = t.Execute([]string{"tailscale", "status"})
+	stdout, stderr, _ := t.Execute([]string{tailscaleBin, "status"})
 	if !strings.Contains(stdout+stderr, "Logged out.") {
-		return fmt.Errorf("failed to logout, stdout: %s, stderr: %s", stdout, stderr)
+		return fmt.Errorf("logging out, stdout: %s, stderr: %s", stdout, stderr) //nolint:err113
 	}
 
-	return t.waitForBackendState("NeedsLogin")
+	return t.waitForBackendState("NeedsLogin", integrationutil.PeerSyncTimeout())
 }
 
-// Helper that runs `tailscale up` with no arguments.
+// Restart restarts the Tailscale container using Docker API.
+// This simulates a container restart (e.g., docker restart or Kubernetes pod restart).
+// The container's entrypoint will re-execute, which typically includes running
+// "tailscale up" with any auth keys stored in environment variables.
+func (t *TailscaleInContainer) Restart() error {
+	if t.container == nil {
+		return errContainerNotInitialized
+	}
+
+	// Use Docker API to restart the container
+	err := t.pool.Client.RestartContainer(t.container.Container.ID, 30)
+	if err != nil {
+		return fmt.Errorf("restarting container %s: %w", t.hostname, err)
+	}
+
+	// Wait for the container to be back up and tailscaled to be ready
+	// We use exponential backoff to poll until we can successfully execute a command
+	_, err = backoff.Retry(context.Background(), func() (struct{}, error) {
+		// Try to execute a simple command to verify the container is responsive
+		_, _, err := t.Execute([]string{tailscaleBin, "version"}, dockertestutil.ExecuteCommandTimeout(5*time.Second))
+		if err != nil {
+			return struct{}{}, fmt.Errorf("container not ready: %w", err)
+		}
+
+		return struct{}{}, nil
+	}, backoff.WithBackOff(backoff.NewExponentialBackOff()), backoff.WithMaxElapsedTime(30*time.Second))
+	if err != nil {
+		return fmt.Errorf("timeout waiting for container %s to restart and become ready: %w", t.hostname, err)
+	}
+
+	return nil
+}
+
+// Up runs `tailscale up` with no arguments.
 func (t *TailscaleInContainer) Up() error {
 	command := []string{
-		"tailscale",
+		tailscaleBin,
 		"up",
 	}
 
-	if _, _, err := t.Execute(command, dockertestutil.ExecuteCommandTimeout(dockerExecuteTimeout)); err != nil {
+	if _, _, err := t.Execute(command, dockertestutil.ExecuteCommandTimeout(dockerExecuteTimeout)); err != nil { //nolint:noinlineerr
 		return fmt.Errorf(
 			"%s failed to bring tailscale client up (%s): %w",
 			t.hostname,
@@ -542,14 +825,14 @@ func (t *TailscaleInContainer) Up() error {
 	return nil
 }
 
-// Helper that runs `tailscale down` with no arguments.
+// Down runs `tailscale down` with no arguments.
 func (t *TailscaleInContainer) Down() error {
 	command := []string{
-		"tailscale",
+		tailscaleBin,
 		"down",
 	}
 
-	if _, _, err := t.Execute(command, dockertestutil.ExecuteCommandTimeout(dockerExecuteTimeout)); err != nil {
+	if _, _, err := t.Execute(command, dockertestutil.ExecuteCommandTimeout(dockerExecuteTimeout)); err != nil { //nolint:noinlineerr
 		return fmt.Errorf(
 			"%s failed to bring tailscale client down (%s): %w",
 			t.hostname,
@@ -561,34 +844,63 @@ func (t *TailscaleInContainer) Down() error {
 	return nil
 }
 
-// IPs returns the netip.Addr of the Tailscale instance.
+// DisconnectFromNetwork detaches the container from network at the
+// docker daemon level. The container's network interface for that
+// network disappears and any in-flight TCP connection is left
+// half-open at the peer — the same failure mode a real cable pull
+// produces, which iptables-based simulations cannot reproduce.
+func (t *TailscaleInContainer) DisconnectFromNetwork(network *dockertest.Network) error {
+	return dockertestutil.DisconnectContainerFromNetwork(t.pool, network, t.hostname)
+}
+
+// ReconnectToNetwork is the inverse of DisconnectFromNetwork: it
+// re-attaches the container to network so traffic can flow again.
+func (t *TailscaleInContainer) ReconnectToNetwork(network *dockertest.Network) error {
+	return dockertestutil.ReconnectContainerToNetwork(t.pool, network, t.hostname)
+}
+
+// IPs returns the [netip.Addr] of the Tailscale instance.
 func (t *TailscaleInContainer) IPs() ([]netip.Addr, error) {
-	if t.ips != nil && len(t.ips) != 0 {
+	if len(t.ips) != 0 {
 		return t.ips, nil
 	}
 
-	ips := make([]netip.Addr, 0)
-
-	command := []string{
-		"tailscale",
-		"ip",
-	}
-
-	result, _, err := t.Execute(command)
-	if err != nil {
-		return []netip.Addr{}, fmt.Errorf("%s failed to join tailscale client: %w", t.hostname, err)
-	}
-
-	for _, address := range strings.Split(result, "\n") {
-		address = strings.TrimSuffix(address, "\n")
-		if len(address) < 1 {
-			continue
+	// Retry with exponential backoff to handle eventual consistency
+	ips, err := backoff.Retry(context.Background(), func() ([]netip.Addr, error) {
+		command := []string{
+			tailscaleBin,
+			"ip",
 		}
-		ip, err := netip.ParseAddr(address)
+
+		result, _, err := t.Execute(command)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("%s failed to get IPs: %w", t.hostname, err)
 		}
-		ips = append(ips, ip)
+
+		ips := make([]netip.Addr, 0)
+
+		for address := range strings.SplitSeq(result, "\n") {
+			address = strings.TrimSuffix(address, "\n")
+			if len(address) < 1 {
+				continue
+			}
+
+			ip, err := netip.ParseAddr(address)
+			if err != nil {
+				return nil, fmt.Errorf("parsing IP %s: %w", address, err)
+			}
+
+			ips = append(ips, ip)
+		}
+
+		if len(ips) == 0 {
+			return nil, fmt.Errorf("no IPs returned yet for %s", t.hostname) //nolint:err113
+		}
+
+		return ips, nil
+	}, backoff.WithBackOff(backoff.NewExponentialBackOff()), backoff.WithMaxElapsedTime(10*time.Second))
+	if err != nil {
+		return nil, fmt.Errorf("getting IPs for %s after retries: %w", t.hostname, err)
 	}
 
 	return ips, nil
@@ -603,13 +915,29 @@ func (t *TailscaleInContainer) MustIPs() []netip.Addr {
 	return ips
 }
 
-func (t *TailscaleInContainer) MustIPv4() netip.Addr {
-	for _, ip := range t.MustIPs() {
+// IPv4 returns the IPv4 address of the Tailscale instance.
+func (t *TailscaleInContainer) IPv4() (netip.Addr, error) {
+	ips, err := t.IPs()
+	if err != nil {
+		return netip.Addr{}, err
+	}
+
+	for _, ip := range ips {
 		if ip.Is4() {
-			return ip
+			return ip, nil
 		}
 	}
-	panic("no ipv4 found")
+
+	return netip.Addr{}, fmt.Errorf("no IPv4 address found for %s", t.hostname) //nolint:err113
+}
+
+func (t *TailscaleInContainer) MustIPv4() netip.Addr {
+	ip, err := t.IPv4()
+	if err != nil {
+		panic(err)
+	}
+
+	return ip
 }
 
 func (t *TailscaleInContainer) MustIPv6() netip.Addr {
@@ -618,37 +946,60 @@ func (t *TailscaleInContainer) MustIPv6() netip.Addr {
 			return ip
 		}
 	}
+
 	panic("no ipv6 found")
 }
 
-// Status returns the ipnstate.Status of the Tailscale instance.
+// execJSON runs command on the Tailscale instance, unmarshals the stdout into a
+// fresh T, and returns the value alongside the raw JSON for callers that persist
+// it. stderr is printed when the command fails. execErr and unmarshalErr provide
+// the error context used in test diagnostics.
+func (t *TailscaleInContainer) execJSON[T any](
+	command []string,
+	execErr, unmarshalErr string,
+) (*T, string, error) {
+	result, stderr, err := t.Execute(command)
+	if err != nil {
+		fmt.Printf("stderr: %s\n", stderr)
+		return nil, "", fmt.Errorf("%s: %w", execErr, err)
+	}
+
+	var v T
+
+	err = json.Unmarshal([]byte(result), &v)
+	if err != nil {
+		return nil, "", fmt.Errorf("%s: %w", unmarshalErr, err)
+	}
+
+	return &v, result, nil
+}
+
+// Status returns the [ipnstate.Status] of the Tailscale instance.
 func (t *TailscaleInContainer) Status(save ...bool) (*ipnstate.Status, error) {
 	command := []string{
-		"tailscale",
+		tailscaleBin,
 		"status",
 		"--json",
 	}
 
-	result, _, err := t.Execute(command)
+	status, raw, err := t.execJSON[ipnstate.Status](
+		command,
+		"executing tailscale status command",
+		"unmarshalling tailscale status",
+	)
 	if err != nil {
-		return nil, fmt.Errorf("failed to execute tailscale status command: %w", err)
+		return nil, err
 	}
 
-	var status ipnstate.Status
-	err = json.Unmarshal([]byte(result), &status)
-	if err != nil {
-		return nil, fmt.Errorf("failed to unmarshal tailscale status: %w", err)
-	}
-
-	err = os.WriteFile(fmt.Sprintf("/tmp/control/%s_status.json", t.hostname), []byte(result), 0o755)
+	err = os.WriteFile(fmt.Sprintf("/tmp/control/%s_status.json", t.hostname), []byte(raw), 0o755) //nolint:gosec // test infrastructure log files
 	if err != nil {
 		return nil, fmt.Errorf("status netmap to /tmp/control: %w", err)
 	}
 
-	return &status, err
+	return status, nil
 }
 
-// MustStatus returns the ipnstate.Status of the Tailscale instance.
+// MustStatus returns the [ipnstate.Status] of the Tailscale instance.
 func (t *TailscaleInContainer) MustStatus() *ipnstate.Status {
 	status, err := t.Status()
 	if err != nil {
@@ -667,47 +1018,44 @@ func (t *TailscaleInContainer) MustID() types.NodeID {
 
 	id, err := strconv.ParseUint(string(status.Self.ID), 10, 64)
 	if err != nil {
-		panic(fmt.Sprintf("failed to parse ID: %s", err))
+		panic(fmt.Sprintf("parsing ID: %s", err))
 	}
 
 	return types.NodeID(id)
 }
 
-// Netmap returns the current Netmap (netmap.NetworkMap) of the Tailscale instance.
+// Netmap returns the current Netmap ([netmap.NetworkMap]) of the Tailscale instance.
 // Only works with Tailscale 1.56 and newer.
 // Panics if version is lower then minimum.
 func (t *TailscaleInContainer) Netmap() (*netmap.NetworkMap, error) {
 	if !util.TailscaleVersionNewerOrEqual("1.56", t.version) {
-		panic(fmt.Sprintf("tsic.Netmap() called with unsupported version: %s", t.version))
+		panic("tsic.Netmap() called with unsupported version: " + t.version)
 	}
 
 	command := []string{
-		"tailscale",
+		tailscaleBin,
 		"debug",
 		"netmap",
 	}
 
-	result, stderr, err := t.Execute(command)
+	nm, raw, err := t.execJSON[netmap.NetworkMap](
+		command,
+		"executing tailscale debug netmap command",
+		"unmarshalling tailscale netmap",
+	)
 	if err != nil {
-		fmt.Printf("stderr: %s\n", stderr)
-		return nil, fmt.Errorf("failed to execute tailscale debug netmap command: %w", err)
+		return nil, err
 	}
 
-	var nm netmap.NetworkMap
-	err = json.Unmarshal([]byte(result), &nm)
-	if err != nil {
-		return nil, fmt.Errorf("failed to unmarshal tailscale netmap: %w", err)
-	}
-
-	err = os.WriteFile(fmt.Sprintf("/tmp/control/%s_netmap.json", t.hostname), []byte(result), 0o755)
+	err = os.WriteFile(fmt.Sprintf("/tmp/control/%s_netmap.json", t.hostname), []byte(raw), 0o755) //nolint:gosec // test infrastructure log files
 	if err != nil {
 		return nil, fmt.Errorf("saving netmap to /tmp/control: %w", err)
 	}
 
-	return &nm, err
+	return nm, nil
 }
 
-// Netmap returns the current Netmap (netmap.NetworkMap) of the Tailscale instance.
+// Netmap returns the current Netmap ([netmap.NetworkMap]) of the Tailscale instance.
 // This implementation is based on getting the netmap from `tailscale debug watch-ipn`
 // as there seem to be some weirdness omitting endpoint and DERP info if we use
 // Patch updates.
@@ -730,8 +1078,10 @@ func (t *TailscaleInContainer) Netmap() (*netmap.NetworkMap, error) {
 // 	return notify.NetMap, nil
 // }
 
-// watchIPN watches `tailscale debug watch-ipn` for a ipn.Notify object until
-// it gets one that has a netmap.NetworkMap.
+// watchIPN watches `tailscale debug watch-ipn` for a [ipn.Notify] object until
+// it gets one that has a [netmap.NetworkMap].
+//
+//nolint:unused
 func (t *TailscaleInContainer) watchIPN(ctx context.Context) (*ipn.Notify, error) {
 	pr, pw := io.Pipe()
 
@@ -739,6 +1089,7 @@ func (t *TailscaleInContainer) watchIPN(ctx context.Context) (*ipn.Notify, error
 		notify *ipn.Notify
 		err    error
 	}
+
 	resultChan := make(chan result, 1)
 
 	// There is no good way to kill the goroutine with watch-ipn,
@@ -749,7 +1100,7 @@ func (t *TailscaleInContainer) watchIPN(ctx context.Context) (*ipn.Notify, error
 			"/bin/sh", "-c", `kill $(ps aux | grep "tailscale debug watch-ipn" | grep -v grep | awk '{print $1}') || true`,
 		})
 		if err != nil {
-			log.Printf("failed to kill tailscale watcher, \nstdout: %s\nstderr: %s\nerr: %s", stdout, stderr, err)
+			log.Printf("killing tailscale watcher, \nstdout: %s\nstderr: %s\nerr: %s", stdout, stderr, err)
 		}
 	}
 
@@ -770,11 +1121,13 @@ func (t *TailscaleInContainer) watchIPN(ctx context.Context) (*ipn.Notify, error
 		decoder := json.NewDecoder(pr)
 		for decoder.More() {
 			var notify ipn.Notify
-			if err := decoder.Decode(&notify); err != nil {
+
+			err := decoder.Decode(&notify)
+			if err != nil {
 				resultChan <- result{nil, fmt.Errorf("parse notify: %w", err)}
 			}
 
-			if notify.NetMap != nil {
+			if notify.NetMap != nil { //nolint:staticcheck // SA1019: NetMap is still populated on the platforms our integration containers run; migrating to InitialStatus/PeerChanges is a separate change
 				resultChan <- result{&notify, nil}
 			}
 		}
@@ -803,49 +1156,42 @@ func (t *TailscaleInContainer) DebugDERPRegion(region string) (*ipnstate.DebugDE
 	}
 
 	command := []string{
-		"tailscale",
+		tailscaleBin,
 		"debug",
 		"derp",
 		region,
 	}
 
-	result, stderr, err := t.Execute(command)
+	report, _, err := t.execJSON[ipnstate.DebugDERPRegionReport](
+		command,
+		"executing tailscale debug derp command",
+		"unmarshalling tailscale derp region report",
+	)
 	if err != nil {
-		fmt.Printf("stderr: %s\n", stderr) // nolint
-
-		return nil, fmt.Errorf("failed to execute tailscale debug derp command: %w", err)
+		return nil, err
 	}
 
-	var report ipnstate.DebugDERPRegionReport
-	err = json.Unmarshal([]byte(result), &report)
-	if err != nil {
-		return nil, fmt.Errorf("failed to unmarshal tailscale derp region report: %w", err)
-	}
-
-	return &report, err
+	return report, nil
 }
 
-// Netcheck returns the current Netcheck Report (netcheck.Report) of the Tailscale instance.
+// Netcheck returns the current Netcheck Report ([netcheck.Report]) of the Tailscale instance.
 func (t *TailscaleInContainer) Netcheck() (*netcheck.Report, error) {
 	command := []string{
-		"tailscale",
+		tailscaleBin,
 		"netcheck",
 		"--format=json",
 	}
 
-	result, stderr, err := t.Execute(command)
+	nm, _, err := t.execJSON[netcheck.Report](
+		command,
+		"executing tailscale debug netcheck command",
+		"unmarshalling tailscale netcheck",
+	)
 	if err != nil {
-		fmt.Printf("stderr: %s\n", stderr)
-		return nil, fmt.Errorf("failed to execute tailscale debug netcheck command: %w", err)
+		return nil, err
 	}
 
-	var nm netcheck.Report
-	err = json.Unmarshal([]byte(result), &nm)
-	if err != nil {
-		return nil, fmt.Errorf("failed to unmarshal tailscale netcheck: %w", err)
-	}
-
-	return &nm, err
+	return nm, nil
 }
 
 // FQDN returns the FQDN as a string of the Tailscale instance.
@@ -854,12 +1200,34 @@ func (t *TailscaleInContainer) FQDN() (string, error) {
 		return t.fqdn, nil
 	}
 
-	status, err := t.Status()
+	// Retry with exponential backoff to handle eventual consistency
+	fqdn, err := backoff.Retry(context.Background(), func() (string, error) {
+		status, err := t.Status()
+		if err != nil {
+			return "", fmt.Errorf("getting status: %w", err)
+		}
+
+		if status.Self.DNSName == "" {
+			return "", errFQDNNotYetAvailable
+		}
+
+		return status.Self.DNSName, nil
+	}, backoff.WithBackOff(backoff.NewExponentialBackOff()), backoff.WithMaxElapsedTime(10*time.Second))
 	if err != nil {
-		return "", fmt.Errorf("failed to get FQDN: %w", err)
+		return "", fmt.Errorf("getting FQDN for %s after retries: %w", t.hostname, err)
 	}
 
-	return status.Self.DNSName, nil
+	return fqdn, nil
+}
+
+// MustFQDN returns the FQDN as a string of the Tailscale instance, panicking on error.
+func (t *TailscaleInContainer) MustFQDN() string {
+	fqdn, err := t.FQDN()
+	if err != nil {
+		panic(err)
+	}
+
+	return fqdn
 }
 
 // FailingPeersAsString returns a formatted-ish multi-line-string of peers in the client
@@ -867,7 +1235,7 @@ func (t *TailscaleInContainer) FQDN() (string, error) {
 func (t *TailscaleInContainer) FailingPeersAsString() (string, bool, error) {
 	status, err := t.Status()
 	if err != nil {
-		return "", false, fmt.Errorf("failed to get FQDN: %w", err)
+		return "", false, fmt.Errorf("getting FQDN: %w", err)
 	}
 
 	var b strings.Builder
@@ -895,75 +1263,119 @@ func (t *TailscaleInContainer) FailingPeersAsString() (string, bool, error) {
 
 // WaitForNeedsLogin blocks until the Tailscale (tailscaled) instance has
 // started and needs to be logged into.
-func (t *TailscaleInContainer) WaitForNeedsLogin() error {
-	return t.waitForBackendState("NeedsLogin")
+func (t *TailscaleInContainer) WaitForNeedsLogin(timeout time.Duration) error {
+	return t.waitForBackendState("NeedsLogin", timeout)
 }
 
 // WaitForRunning blocks until the Tailscale (tailscaled) instance is logged in
 // and ready to be used.
-func (t *TailscaleInContainer) WaitForRunning() error {
-	return t.waitForBackendState("Running")
+func (t *TailscaleInContainer) WaitForRunning(timeout time.Duration) error {
+	return t.waitForBackendState("Running", timeout)
 }
 
-func (t *TailscaleInContainer) waitForBackendState(state string) error {
-	return t.pool.Retry(func() error {
-		status, err := t.Status()
-		if err != nil {
-			return errTailscaleStatus(t.hostname, err)
-		}
+func (t *TailscaleInContainer) waitForBackendState(state string, timeout time.Duration) error {
+	ticker := time.NewTicker(integrationutil.PeerSyncRetryInterval())
+	defer ticker.Stop()
 
-		// ipnstate.Status.CurrentTailnet was added in Tailscale 1.22.0
-		// https://github.com/tailscale/tailscale/pull/3865
-		//
-		// Before that, we can check the BackendState to see if the
-		// tailscaled daemon is connected to the control system.
-		if status.BackendState == state {
-			return nil
-		}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
 
-		return errTailscaleNotConnected
-	})
+	for {
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("timeout waiting for backend state %s on %s after %v", state, t.hostname, timeout) //nolint:err113
+		case <-ticker.C:
+			status, err := t.Status()
+			if err != nil {
+				continue // Keep retrying on status errors
+			}
+
+			// [ipnstate.Status.CurrentTailnet] was added in Tailscale 1.22.0
+			// https://github.com/tailscale/tailscale/pull/3865
+			//
+			// Before that, we can check the BackendState to see if the
+			// tailscaled daemon is connected to the control system.
+			if status.BackendState == state {
+				return nil
+			}
+		}
+	}
 }
 
 // WaitForPeers blocks until N number of peers is present in the
 // Peer list of the Tailscale instance and is reporting Online.
-func (t *TailscaleInContainer) WaitForPeers(expected int) error {
-	return t.pool.Retry(func() error {
-		status, err := t.Status()
-		if err != nil {
-			return errTailscaleStatus(t.hostname, err)
-		}
+//
+// The method verifies that each peer:
+// - Has the expected peer count
+// - All peers are Online
+// - All peers have a hostname
+// - All peers have a DERP relay assigned
+//
+// Uses multierr to collect all validation errors.
+func (t *TailscaleInContainer) WaitForPeers(expected int, timeout, retryInterval time.Duration) error {
+	ticker := time.NewTicker(retryInterval)
+	defer ticker.Stop()
 
-		if peers := status.Peers(); len(peers) != expected {
-			return fmt.Errorf(
-				"%s err: %w expected %d, got %d",
-				t.hostname,
-				errTailscaleWrongPeerCount,
-				expected,
-				len(peers),
-			)
-		} else {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	var lastErrs []error
+
+	for {
+		select {
+		case <-ctx.Done():
+			if len(lastErrs) > 0 {
+				return fmt.Errorf("timeout waiting for %d peers on %s after %v, errors: %w", expected, t.hostname, timeout, multierr.New(lastErrs...))
+			}
+
+			return fmt.Errorf("timeout waiting for %d peers on %s after %v", expected, t.hostname, timeout) //nolint:err113
+		case <-ticker.C:
+			status, err := t.Status()
+			if err != nil {
+				lastErrs = []error{errTailscaleStatus(t.hostname, err)}
+				continue // Keep retrying on status errors
+			}
+
+			if peers := status.Peers(); len(peers) != expected {
+				lastErrs = []error{fmt.Errorf(
+					"%s err: %w expected %d, got %d",
+					t.hostname,
+					errTailscaleWrongPeerCount,
+					expected,
+					len(peers),
+				)}
+
+				continue
+			}
+
 			// Verify that the peers of a given node is Online
 			// has a hostname and a DERP relay.
-			for _, peerKey := range peers {
+			var peerErrors []error
+
+			for _, peerKey := range status.Peers() {
 				peer := status.Peer[peerKey]
 
 				if !peer.Online {
-					return fmt.Errorf("[%s] peer count correct, but %s is not online", t.hostname, peer.HostName)
+					peerErrors = append(peerErrors, fmt.Errorf("[%s] peer count correct, but %s is not online", t.hostname, peer.HostName)) //nolint:err113
 				}
 
 				if peer.HostName == "" {
-					return fmt.Errorf("[%s] peer count correct, but %s does not have a Hostname", t.hostname, peer.HostName)
+					peerErrors = append(peerErrors, fmt.Errorf("[%s] peer count correct, but %s does not have a Hostname", t.hostname, peer.HostName)) //nolint:err113
 				}
 
 				if peer.Relay == "" {
-					return fmt.Errorf("[%s] peer count correct, but %s does not have a DERP", t.hostname, peer.HostName)
+					peerErrors = append(peerErrors, fmt.Errorf("[%s] peer count correct, but %s does not have a DERP", t.hostname, peer.HostName)) //nolint:err113
 				}
 			}
-		}
 
-		return nil
-	})
+			if len(peerErrors) > 0 {
+				lastErrs = peerErrors
+				continue
+			}
+
+			return nil
+		}
+	}
 }
 
 type (
@@ -1002,11 +1414,11 @@ func WithPingUntilDirect(direct bool) PingOption {
 }
 
 // Ping executes the Tailscale ping command and pings a hostname
-// or IP. It accepts a series of PingOption.
+// or IP. It accepts a series of [PingOption].
 // TODO(kradalby): Make multiping, go routine magic.
 func (t *TailscaleInContainer) Ping(hostnameOrIP string, opts ...PingOption) error {
 	args := pingArgs{
-		timeout: defaultPingTimeout,
+		timeout: defaultPingTimeoutVal(),
 		count:   defaultPingCount,
 		direct:  true,
 	}
@@ -1015,14 +1427,15 @@ func (t *TailscaleInContainer) Ping(hostnameOrIP string, opts ...PingOption) err
 		opt(&args)
 	}
 
-	command := []string{
-		"tailscale", "ping",
+	command := make([]string, 0, 6)
+	command = append(
+		command,
+		tailscaleBin, "ping",
 		fmt.Sprintf("--timeout=%s", args.timeout),
 		fmt.Sprintf("--c=%d", args.count),
-		fmt.Sprintf("--until-direct=%s", strconv.FormatBool(args.direct)),
-	}
-
-	command = append(command, hostnameOrIP)
+		"--until-direct="+strconv.FormatBool(args.direct),
+		hostnameOrIP,
+	)
 
 	result, _, err := t.Execute(
 		command,
@@ -1033,7 +1446,7 @@ func (t *TailscaleInContainer) Ping(hostnameOrIP string, opts ...PingOption) err
 	if err != nil {
 		log.Printf("command: %v", command)
 		log.Printf(
-			"failed to run ping command from %s to %s, err: %s",
+			"running ping command from %s to %s, err: %s",
 			t.Hostname(),
 			hostnameOrIP,
 			err,
@@ -1051,7 +1464,14 @@ func (t *TailscaleInContainer) Ping(hostnameOrIP string, opts ...PingOption) err
 	}
 
 	if !args.direct {
-		if strings.Contains(result, "via DERP") {
+		// Non-direct mode accepts any indirect path: DERP, a plain
+		// tailscale relay, or a peer relay. Tailscale reports peer
+		// relay hops as "via peer-relay(ip:port:vni:N)", which does
+		// not contain the "via relay" substring and was previously
+		// rejected here.
+		if strings.Contains(result, "via DERP") ||
+			strings.Contains(result, "via relay") ||
+			strings.Contains(result, "via peer-relay") {
 			return nil
 		} else {
 			return errTailscalePingNotDERP
@@ -1099,15 +1519,15 @@ func WithCurlRetry(ret int) CurlOption {
 }
 
 const (
-	defaultConnectionTimeout = 3 * time.Second
-	defaultMaxTime           = 10 * time.Second
-	defaultRetry             = 5
-	defaultRetryDelay        = 0 * time.Second
-	defaultRetryMaxTime      = 50 * time.Second
+	defaultConnectionTimeout = 1 * time.Second
+	defaultMaxTime           = 3 * time.Second
+	defaultRetry             = 3
+	defaultRetryDelay        = 200 * time.Millisecond
+	defaultRetryMaxTime      = 5 * time.Second
 )
 
 // Curl executes the Tailscale curl command and curls a hostname
-// or IP. It accepts a series of CurlOption.
+// or IP. It accepts a series of [CurlOption].
 func (t *TailscaleInContainer) Curl(url string, opts ...CurlOption) (string, error) {
 	args := curlArgs{
 		connectionTimeout: defaultConnectionTimeout,
@@ -1124,19 +1544,20 @@ func (t *TailscaleInContainer) Curl(url string, opts ...CurlOption) (string, err
 	command := []string{
 		"curl",
 		"--silent",
-		"--connect-timeout", fmt.Sprintf("%d", int(args.connectionTimeout.Seconds())),
-		"--max-time", fmt.Sprintf("%d", int(args.maxTime.Seconds())),
-		"--retry", fmt.Sprintf("%d", args.retry),
-		"--retry-delay", fmt.Sprintf("%d", int(args.retryDelay.Seconds())),
-		"--retry-max-time", fmt.Sprintf("%d", int(args.retryMaxTime.Seconds())),
+		"--connect-timeout", strconv.Itoa(int(args.connectionTimeout.Seconds())),
+		"--max-time", strconv.Itoa(int(args.maxTime.Seconds())),
+		"--retry", strconv.Itoa(args.retry),
+		"--retry-delay", strconv.Itoa(int(args.retryDelay.Seconds())),
+		"--retry-max-time", strconv.Itoa(int(args.retryMaxTime.Seconds())),
 		url,
 	}
 
 	var result string
+
 	result, _, err := t.Execute(command)
 	if err != nil {
 		log.Printf(
-			"failed to run curl command from %s to %s, err: %s",
+			"running curl command from %s to %s, err: %s",
 			t.Hostname(),
 			url,
 			err,
@@ -1145,16 +1566,45 @@ func (t *TailscaleInContainer) Curl(url string, opts ...CurlOption) (string, err
 		return result, err
 	}
 
+	// curl exit 0 with an empty body usually means a mid-stream reset
+	// after headers (HTTP 200 with the connection torn down before the
+	// body arrived). Without this signal, callers wrapping the call in
+	// [assert.EventuallyWithT] see [assert.NoError] pass and [assert.Len] fail with
+	// no error to drive a retry.
+	if result == "" {
+		return result, fmt.Errorf("%w: %s from %s", errCurlEmptyResponseBody, url, t.Hostname())
+	}
+
 	return result, nil
 }
 
+// CurlFailFast executes the Tailscale curl command with aggressive timeouts
+// optimized for testing expected connection failures. It uses minimal timeouts
+// to quickly detect blocked connections without waiting for multiple retries.
+func (t *TailscaleInContainer) CurlFailFast(url string) (string, error) {
+	// Use aggressive timeouts for fast failure detection
+	return t.Curl(url,
+		WithCurlConnectionTimeout(1*time.Second),
+		WithCurlMaxTime(2*time.Second),
+		WithCurlRetry(1))
+}
+
 func (t *TailscaleInContainer) Traceroute(ip netip.Addr) (util.Traceroute, error) {
+	// -w 1: wait at most 1s for each probe response. busybox's default
+	//       is 5s, which means an [assert.EventuallyWithT] loop at 200ms ticks
+	//       can spend 25 ticks worth of budget on a single Traceroute.
+	// -q 1: send 1 probe per hop instead of 3. The HA tests only care
+	//       about the first hop's identity; the other probes are dead
+	//       weight for the same retry budget.
 	command := []string{
 		"traceroute",
+		"-w", "1",
+		"-q", "1",
 		ip.String(),
 	}
 
 	var result util.Traceroute
+
 	stdout, stderr, err := t.Execute(command)
 	if err != nil {
 		return result, err
@@ -1186,7 +1636,7 @@ func (t *TailscaleInContainer) SaveLog(path string) (string, string, error) {
 }
 
 // WriteLogs writes the current stdout/stderr log of the container to
-// the given io.Writers.
+// the given [io.Writer]s.
 func (t *TailscaleInContainer) WriteLogs(stdout, stderr io.Writer) error {
 	return dockertestutil.WriteLog(t.pool, t.container, stdout, stderr)
 }
@@ -1200,31 +1650,82 @@ func (t *TailscaleInContainer) ReadFile(path string) ([]byte, error) {
 	}
 
 	var out bytes.Buffer
+
 	tr := tar.NewReader(bytes.NewReader(tarBytes))
 	for {
 		hdr, err := tr.Next()
 		if err == io.EOF {
 			break // End of archive
 		}
+
 		if err != nil {
 			return nil, fmt.Errorf("reading tar header: %w", err)
 		}
 
 		if !strings.Contains(path, hdr.Name) {
-			return nil, fmt.Errorf("file not found in tar archive, looking for: %s, header was: %s", path, hdr.Name)
+			return nil, fmt.Errorf("file not found in tar archive, looking for: %s, header was: %s", path, hdr.Name) //nolint:err113
 		}
 
-		if _, err := io.Copy(&out, tr); err != nil {
+		if _, err := io.Copy(&out, tr); err != nil { //nolint:gosec,noinlineerr // trusted tar from test container
 			return nil, fmt.Errorf("copying file to buffer: %w", err)
 		}
 
 		// Only support reading the first tile
-		break
+		break //nolint:staticcheck // SA4004: intentional - only read first file
 	}
 
 	if out.Len() == 0 {
-		return nil, fmt.Errorf("file is empty")
+		return nil, errors.New("file is empty") //nolint:err113
 	}
 
 	return out.Bytes(), nil
+}
+
+func (t *TailscaleInContainer) GetNodePrivateKey() (*key.NodePrivate, error) {
+	state, err := t.ReadFile(paths.DefaultTailscaledStateFile())
+	if err != nil {
+		return nil, fmt.Errorf("reading state file: %w", err)
+	}
+
+	store := &mem.Store{}
+	if err = store.LoadFromJSON(state); err != nil { //nolint:noinlineerr
+		return nil, fmt.Errorf("unmarshalling state file: %w", err)
+	}
+
+	currentProfileKey, err := store.ReadState(ipn.CurrentProfileStateKey)
+	if err != nil {
+		return nil, fmt.Errorf("reading current profile state key: %w", err)
+	}
+
+	currentProfile, err := store.ReadState(ipn.StateKey(currentProfileKey))
+	if err != nil {
+		return nil, fmt.Errorf("reading current profile state: %w", err)
+	}
+
+	p := &ipn.Prefs{}
+	if err = json.Unmarshal(currentProfile, &p); err != nil { //nolint:noinlineerr
+		return nil, fmt.Errorf("unmarshalling current profile state: %w", err)
+	}
+
+	return &p.Persist.PrivateNodeKey, nil
+}
+
+// ConnectToNetwork connects the Tailscale container to an additional Docker [dockertest.Network].
+func (t *TailscaleInContainer) ConnectToNetwork(network *dockertest.Network) error {
+	return t.container.ConnectToNetwork(network)
+}
+
+// PacketFilter returns the current packet filter rules from the client's network map.
+// This is useful for verifying that policy changes have propagated to the client.
+func (t *TailscaleInContainer) PacketFilter() ([]filter.Match, error) {
+	if !util.TailscaleVersionNewerOrEqual("1.56", t.version) {
+		return nil, fmt.Errorf("tsic.PacketFilter() requires Tailscale 1.56+, current version: %s", t.version) //nolint:err113
+	}
+
+	nm, err := t.Netmap()
+	if err != nil {
+		return nil, fmt.Errorf("getting netmap: %w", err)
+	}
+
+	return nm.PacketFilter, nil
 }

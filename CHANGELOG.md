@@ -1,18 +1,725 @@
 # CHANGELOG
 
-## Next
+## 0.30.0 (202x-xx-xx)
+
+**Minimum supported Tailscale client version: v1.82.0**
+
+### v1 REST API replaced; gRPC and Protobuf removed
+
+The v1 REST API now provides an OpenAPI 3.1 specification at
+`/api/v1/openapi.yaml`, with interactive documentation at `/api/v1/docs`. This
+replaces the Swagger 2.0 document and the `/swagger` UI. The Protobuf, gRPC and
+grpc-gateway stack behind it is gone, and the `headscale` CLI now talks to the
+HTTP API directly.
+
+[#3324](https://github.com/juanfont/headscale/pull/3324)
+
+### OAuth clients and scopes for the v2 API
+
+The v2 API now authenticates with OAuth 2.0 client-credentials, the way the
+Tailscale ecosystem does. An OAuth client mints short-lived access tokens whose
+scopes limit which operations they may perform and whose tags limit the devices
+they may create, so a credential can be issued with only the access it needs.
+The `headscale oauth-clients` command manages them. This lets the Tailscale
+Terraform provider and Kubernetes operator drive Headscale unchanged; admin API
+keys remain all-access.
+
+[#3334](https://github.com/juanfont/headscale/pull/3334)
 
 ### BREAKING
 
-- Policy: Zero or empty destination port is no longer allowed
-  [#2606](https://github.com/juanfont/headscale/pull/2606)
+#### API
+
+- The gRPC API is removed; all programmatic access now goes through the HTTP API at `/api/v1` [#3324](https://github.com/juanfont/headscale/pull/3324)
+- API errors are now RFC 7807 `application/problem+json`, including authentication failures, instead of the previous gRPC-status JSON shape [#3324](https://github.com/juanfont/headscale/pull/3324)
+- Errors that previously returned HTTP 500 — unknown users or nodes, malformed input, duplicate names — now return the correct 404, 400 or 409 [#3324](https://github.com/juanfont/headscale/pull/3324)
+- The OpenAPI document is OpenAPI 3.1 at `/api/v1/openapi.yaml` (docs at `/api/v1/docs`), replacing Swagger 2.0 at `/swagger` [#3324](https://github.com/juanfont/headscale/pull/3324)
+
+#### CLI
+
+- `--output json` / `--output yaml` now emit the API's shape — camelCase fields, string-encoded IDs, RFC3339 timestamps — instead of the old Protobuf encoding [#3324](https://github.com/juanfont/headscale/pull/3324)
+- `headscale policy` renames the database-bypass flag from `--bypass-grpc-and-access-database-directly` to `--bypass-server-and-access-database-directly` [#3324](https://github.com/juanfont/headscale/pull/3324)
 
 ### Changes
 
-- Remove policy v1 code
-  [#2600](https://github.com/juanfont/headscale/pull/2600)
-- Refactor Debian/Ubuntu packaging and drop support for Ubuntu 20.04.
-  [#2614](https://github.com/juanfont/headscale/pull/2614)
+- Expiring or deleting a non-existent pre-auth key now returns an error instead of silently succeeding [#3324](https://github.com/juanfont/headscale/pull/3324)
+- Improve systemd service file hardening [#3341](https://github.com/juanfont/headscale/pull/3341)
+- The peer map is keyed by node ID and reused for writes that cannot change peer visibility, so a routine map request no longer rebuilds it. Adds `headscale_nodestore_snapshot_builds_total` [#3417](https://github.com/juanfont/headscale/issues/3417) [#3450](https://github.com/juanfont/headscale/pull/3450)
+- Headscale now requires Go 1.27 to build
+
+## 0.29.4 (unreleased)
+
+**Minimum supported Tailscale client version: v1.80.0**
+
+### Changes
+
+- Fix a node being listed among its own peers in an incremental map update, which crashes the Tailscale Android app on the device list [#3459](https://github.com/juanfont/headscale/pull/3459)
+- Fix deleting a node leaving its long poll open, so the client stayed connected instead of asking for a new login [#3449](https://github.com/juanfont/headscale/pull/3449)
+- Fix interactive OIDC login when the confirmation page is reloaded by an ad blocker, back navigation, or pull-to-refresh; the confirmation page now has its own URL, keeping single-use authorization codes out of reloads [#3448](https://github.com/juanfont/headscale/pull/3448)
+- Harden the OIDC callback: state and nonce cookies take their Secure flag from `server_url` so they survive a TLS-terminating proxy, a callback state is single-use, and an invalid `oidc.issuer` or a missing `oidc.client_id`/`oidc.client_secret` now fails at startup [#3334](https://github.com/juanfont/headscale/pull/3334)
+- Fix HTTP metrics only counting `OPTIONS` requests, so `http_requests_total` and `http_request_duration_seconds` now cover regular traffic [#3414](https://github.com/juanfont/headscale/pull/3414)
+- Fix extra-records filewatcher hanging on shutdown after the watched file is deleted, and leaking the watcher when setup fails [#3437](https://github.com/juanfont/headscale/pull/3437)
+- Lowercase DNS extra record names so mixed-case records resolve [#3366](https://github.com/juanfont/headscale/pull/3366)
+- Fix `headscale users rename` sending the raw `--identifier` flag value instead of the matched user's identifier, so renaming by name works again [#3442](https://github.com/juanfont/headscale/pull/3442)
+- Fix tailsql not shutting down with headscale, leaving the process hanging on graceful shutdown [#3400](https://github.com/juanfont/headscale/pull/3400)
+- Fix tvOS setup instructions: install the VPN configuration before setting the coordination server URL [#3431](https://github.com/juanfont/headscale/pull/3431)
+- Map requests that only bump LastSeen, endpoints or DERP region no longer resend the whole node to every peer, and health probes that change nothing no longer write. Adds `headscale_mapper_changes_dropped_total` and `headscale_ha_health_updates_total` [#3417](https://github.com/juanfont/headscale/issues/3417) [#3450](https://github.com/juanfont/headscale/pull/3450)
+
+## 0.29.3 (2026-07-29)
+
+**Minimum supported Tailscale client version: v1.80.0**
+
+### Changes
+
+- Fix tagged node stuck expired after `tailscale logout`, unable to re-authenticate [#3394](https://github.com/juanfont/headscale/pull/3394)
+- Re-registering a tagged node with a different pre-auth key now applies the new key's tags instead of silently keeping the old ones [#3394](https://github.com/juanfont/headscale/pull/3394)
+- Fix re-authenticating an already-tagged node with `--advertise-tags` being rejected when the authenticating user owns the tags [#3394](https://github.com/juanfont/headscale/pull/3394)
+- Fix ephemeral nodes lingering as disconnected after reconnect churn [#3383](https://github.com/juanfont/headscale/pull/3383)
+- Fix node registration falsely returning `401 registration timed out` when auth completes as the request context expires [#3392](https://github.com/juanfont/headscale/pull/3392)
+- Check the machine key on the followup registration poll so a leaked auth ID cannot return the registering user's identity [#3393](https://github.com/juanfont/headscale/pull/3393)
+- Reject `/key` requests below the supported capability version floor, matching `/ts2021` [#3391](https://github.com/juanfont/headscale/pull/3391)
+- Remove a leftover trace log that always rendered a JSON marshaling error [#3398](https://github.com/juanfont/headscale/pull/3398)
+
+## 0.29.2 (2026-07-01)
+
+**Minimum supported Tailscale client version: v1.80.0**
+
+### Changes
+
+- Fix map generation serializing on the policy lock, so a mass reconnect on `autogroup:self`, via or relay policies no longer stalls clients into `unexpected EOF` retry loops [#3358](https://github.com/juanfont/headscale/pull/3358)
+- Fix `/ts2021` rejecting the WebSocket `GET` upgrade with 405, which prevented Tailscale JS/WASM control clients from connecting [#3359](https://github.com/juanfont/headscale/pull/3359)
+- Gracefully handle nodes with an invalid FQDN (empty or too long) instead of failing map delivery; offending names are logged at startup with the fix command [#3349](https://github.com/juanfont/headscale/pull/3349)
+
+## 0.29.1 (2026-06-18)
+
+**Minimum supported Tailscale client version: v1.80.0**
+
+### Changes
+
+- Fix nodes with `tags='null'` losing their assigned user on upgrade [#3325](https://github.com/juanfont/headscale/pull/3325)
+
+## 0.29.0 (2026-06-17)
+
+**Minimum supported Tailscale client version: v1.80.0**
+
+### Tailscale ACL compatibility improvements
+
+Extensive test cases were systematically generated using Tailscale clients and the official SaaS
+to understand how the packet filter should be generated. We discovered a few differences, but
+overall our implementation was very close.
+[#3036](https://github.com/juanfont/headscale/pull/3036)
+
+### SSH check action
+
+SSH rules with `"action": "check"` are now supported. When a client initiates a SSH connection to a node
+with a `check` action policy, the user is prompted to authenticate via OIDC or CLI approval before access
+is granted. OIDC approval requires the authenticated user to own the source node; tagged source nodes
+cannot use SSH check-mode.
+
+A new `headscale auth` CLI command group supports the approval flow:
+
+- `headscale auth approve --auth-id <id>` approves a pending authentication request (SSH check or web auth)
+- `headscale auth reject --auth-id <id>` rejects a pending authentication request
+- `headscale auth register --auth-id <id> --user <user>` registers a node (replaces deprecated `headscale nodes register`)
+
+[#1850](https://github.com/juanfont/headscale/pull/1850)
+[#3180](https://github.com/juanfont/headscale/pull/3180)
+
+### Policy tests (beta)
+
+Headscale now evaluates the `tests` block in a policy file. Tests assert reachability between
+named sources and destinations and cover the whole policy — both `acls` and `grants` rules
+contribute. They run on user-initiated writes via `headscale policy set`, on SIGHUP reload
+(`systemctl reload headscale` / `kill -HUP $(pidof headscale)`), and on `headscale policy check`.
+A failing test rejects the write before it is applied, with the same error message Tailscale SaaS
+would return for the same policy.
+
+At boot a stored policy whose tests no longer pass — for example because a referenced user was
+deleted while the server was offline — logs a warning and the server keeps running. Fix the
+policy and reload.
+
+This feature is **beta** while behavioural coverage against Tailscale SaaS broadens.
+
+[#3229](https://github.com/juanfont/headscale/pull/3229)
+
+### SSH policy tests (beta)
+
+Headscale now evaluates the `sshTests` block in a policy file. Each entry names a source, one or
+more destination hosts, and three optional user lists: `accept` asserts the listed login users
+reach every destination via an accept- or check-action SSH rule, `deny` asserts none of them
+reach any destination, and `check` requires reachability specifically through a check-action
+rule. Tests run on `headscale policy set`, on SIGHUP reload (`systemctl reload headscale` /
+`kill -HUP $(pidof headscale)`), and on `headscale policy check`. A failing test rejects the
+write before it is applied, with the same error message Tailscale SaaS would return for the same
+policy.
+
+At boot a stored policy whose sshTests no longer pass — for example because a referenced user was
+deleted while the server was offline — logs a warning and the server keeps running. Fix the
+policy and reload.
+
+This feature is **beta** while behavioural coverage against Tailscale SaaS broadens.
+
+[#3263](https://github.com/juanfont/headscale/pull/3263)
+
+### SSH rule validation
+
+SSH rule parsing now trims surrounding whitespace on `action`, `users`, `src`, and `dst`,
+rejects empty or wildcard entries in `users`, rejects empty `acceptEnv`, and rejects negative
+`checkPeriod`. `hosts:` aliases are rejected as SSH destinations, non-ASCII tag names are
+rejected at parse time, and the wording for group-nesting cycles matches Tailscale SaaS.
+[#3263](https://github.com/juanfont/headscale/pull/3263)
+
+### Grants
+
+We now support [Tailscale grants](https://tailscale.com/docs/features/access-control/grants)
+alongside ACLs. Grants extend what you can express in a policy beyond packet filtering: the `app`
+field controls application-level features like Taildrive file sharing and peer relay, and the `via`
+field steers traffic through specific tagged subnet routers or exit nodes. The `ip` field works like
+an ACL rule. Grants can be mixed with ACLs in the same policy file.
+[#2180](https://github.com/juanfont/headscale/pull/2180)
+
+As part of this, we added `autogroup:danger-all`. It resolves to `0.0.0.0/0` and `::/0`, all IP
+addresses, including those outside the tailnet. This replaces the old behaviour where `*` matched
+all IPs (see BREAKING below). The name is intentional: accepting traffic from the entire
+internet is a security-sensitive choice. `autogroup:danger-all` can only be used as a source.
+
+### Node attributes (`nodeAttrs`)
+
+ACL policies now accept a `nodeAttrs` block. Each entry hands a list of
+Tailscale node capabilities to every node matching `target`. The accepted
+target forms are the same as `acls.src` and `grants.src`: users, groups,
+tags, hosts, prefixes, `autogroup:member`, `autogroup:tagged`, and `*`.
+
+```jsonc
+{
+  "randomizeClientPort": true,
+  "nodeAttrs": [
+    { "target": ["autogroup:tagged"], "attr": ["disable-captive-portal-detection"] },
+    { "target": ["alice@example.com"], "attr": ["nextdns:abc123"] },
+  ],
+}
+```
+
+Frequently requested capabilities this unlocks include `magicdns-aaaa`,
+`disable-relay-server`, `disable-captive-portal-detection`,
+`nextdns:<profile>` / `nextdns:no-device-info`, `randomize-client-port`,
+and the Taildrive `drive:share` / `drive:access` pair. The set is not
+limited to these, any string-only cap an operator places in policy
+reaches clients unchanged.
+
+`randomizeClientPort` also lands as a top-level policy field that toggles
+the default for every node, replacing the old server-config knob.
+
+A new `auto_update.enabled` config option controls the tailnet-wide
+default for client auto-update. When true, every node's CapMap carries
+`default-auto-update: [true]` so fresh clients pick up the default
+unless they make a local opt-in / opt-out choice.
+
+Policies that use the `funnel` cap, `ipPool` blocks, or
+`autogroup:admin` / `autogroup:owner` targets are rejected at load —
+those features depend on machinery headscale does not yet ship.
+
+[#3251](https://github.com/juanfont/headscale/pull/3251)
+
+### Taildrive
+
+Taildrive ([file-sync between
+nodes](https://tailscale.com/docs/features/taildrive)) is now
+configurable through policy. Grant `drive:share` to the node that
+hosts files and `drive:access` to nodes that read or write them; pair
+with a `tailscale.com/cap/drive` grant to set the per-share access
+mode:
+
+```jsonc
+{
+  "nodeAttrs": [
+    { "target": ["tag:fileserver"], "attr": ["drive:share"] },
+    { "target": ["autogroup:member"], "attr": ["drive:access"] },
+  ],
+  "grants": [
+    {
+      "src": ["autogroup:member"],
+      "dst": ["tag:fileserver"],
+      "app": {
+        "tailscale.com/cap/drive": [{ "shares": ["*"], "access": "rw" }],
+      },
+    },
+  ],
+}
+```
+
+A wildcard `nodeAttrs` (`"target": ["*"]`) hands the caps to every
+node when fine-grained control is not needed.
+
+### Hostname sanitisation
+
+Hostnames are now santised using Tailscales `magicdns` sanitisation rules, matching Tailscale SaaS behavior. This means that hostnames with non-ASCII characters, special characters, or reserved DNS label characters are now transformed into valid DNS labels for MagicDNS. This improves our previously too strict sanitisation that rejected hostnames based on our guesswork and not based on the Tailscale upstream behaviour.
+
+Examples that previously regressed and now work:
+
+| Input                | Raw (Hostname)       | DNS label (GivenName) |
+| -------------------- | -------------------- | --------------------- |
+| `Joe's Mac mini`     | `Joe's Mac mini`     | `joes-mac-mini`       |
+| `Yuri's MacBook Pro` | `Yuri's MacBook Pro` | `yuris-macbook-pro`   |
+| `Test@Host`          | `Test@Host`          | `test-host`           |
+| `mail.server`        | `mail.server`        | `mail-server`         |
+| `My-PC!`             | `My-PC!`             | `my-pc`               |
+| `我的电脑`           | `我的电脑`           | `node`                |
+
+[#3202](https://github.com/juanfont/headscale/pull/3202)
+
+### HA subnet router health probing
+
+Headscale now actively probes HA subnet routers to detect nodes that are connected but not
+forwarding traffic. The control plane periodically pings HA subnet routers via the Noise
+control channel and fails over to a healthy standby if the primary stops responding. This is
+enabled by default (`node.routes.ha.probe_interval: 10s`, `probe_timeout: 5s`) and only
+active when HA routes exist (2+ nodes advertising the same prefix). Set `probe_interval` to
+`0` to disable. This complements the existing disconnect-based failover, catching "zombie
+connected" routers that maintain their control session but cannot route packets.
+[#3194](https://github.com/juanfont/headscale/pull/3194)
+
+### BREAKING
+
+#### Hostname handling
+
+- The `GivenName` collision policy changed from an 8-char random hash suffix (`laptop-abc12xyz`) to a monotonic numeric suffix (`laptop`, `laptop-1`, `laptop-2`, …), matching Tailscale SaaS. Empty / all-non-ASCII hostnames now fall back to the literal `node` instead of `invalid-<rand>`. MagicDNS names change on upgrade for any node whose previous label was a random-suffix form; the raw `Hostname` column is unchanged. [#3202](https://github.com/juanfont/headscale/pull/3202)
+
+#### ACL Policy
+
+- Wildcard (`*`) in ACL sources and destinations now resolves to Tailscale's CGNAT range (`100.64.0.0/10`) and ULA range (`fd7a:115c:a1e0::/48`) instead of all IPs (`0.0.0.0/0` and `::/0`) [#3036](https://github.com/juanfont/headscale/pull/3036)
+  - This better matches Tailscale's security model where `*` means "any node in the tailnet" rather than "any IP address"
+  - Policies that need to match all IP addresses including non-Tailscale IPs should use `autogroup:danger-all` as a source, or explicit CIDR ranges as destinations [#2180](https://github.com/juanfont/headscale/pull/2180)
+  - `autogroup:danger-all` can only be used as a source; it cannot be used as a destination
+  - **Note**: Users with non-standard IP ranges configured in `prefixes.ipv4` or `prefixes.ipv6` (which is unsupported and produces a warning) will need to explicitly specify their CIDR ranges in ACL rules instead of using `*`
+- Validate `autogroup:self` source restrictions matching Tailscale behavior - tags, hosts, and IPs are rejected as sources for `autogroup:self` destinations [#3036](https://github.com/juanfont/headscale/pull/3036)
+  - Policies using tags, hosts, or IP addresses as sources for `autogroup:self` destinations will now fail validation
+- The `proto:icmp` protocol name now only includes ICMPv4 (protocol 1), matching Tailscale behavior [#3036](https://github.com/juanfont/headscale/pull/3036)
+  - Previously, `proto:icmp` included both ICMPv4 and ICMPv6
+  - Use `proto:ipv6-icmp` or protocol number `58` explicitly for ICMPv6
+
+#### Upgrade Path
+
+- Headscale now enforces a strict version upgrade path [#3083](https://github.com/juanfont/headscale/pull/3083)
+  - Skipping minor versions (e.g. 0.27 → 0.29) is blocked; upgrade one minor version at a time
+  - Downgrading to a previous minor version is blocked
+  - Patch version changes within the same minor are always allowed
+
+#### Configuration
+
+- The `randomize_client_port` server-config key was removed; the
+  toggle now lives in the policy file as a top-level
+  `randomizeClientPort` field, matching the Tailscale-hosted schema. [#3251](https://github.com/juanfont/headscale/pull/3251)
+  Headscale refuses to start when the old key is set. Move it to the
+  policy file referenced by `policy.path`:
+
+  ```jsonc
+  {
+    "randomizeClientPort": true,
+  }
+  ```
+
+  If you do not have a policy file yet, create one with that minimal
+  content and point `policy.path` at it. The default carries over —
+  empty / absent policy means `randomizeClientPort: false`, matching
+  the previous behaviour for operators who never set the key. Per-node
+  opt-in via `nodeAttrs` is also supported and stacks on top of the
+  global default.
+
+#### CLI
+
+- `headscale nodes register` is deprecated in favour of `headscale auth register --auth-id <id> --user <user>` [#1850](https://github.com/juanfont/headscale/pull/1850)
+  - The old command continues to work but will be removed in a future release
+
+### Changes
+
+#### ACL Policy
+
+- Fix subnet-to-subnet peer visibility — subnet routers now correctly become peers when ACL rules reference only subnet CIDRs as sources, without requiring node IP rules [#3175](https://github.com/juanfont/headscale/pull/3175)
+- Fix filter rule reduction to use only approved subnet routes instead of all advertised routes, matching Tailscale SaaS behavior [#3175](https://github.com/juanfont/headscale/pull/3175)
+- Add ICMP and IPv6-ICMP protocols to default filter rules when no protocol is specified [#3036](https://github.com/juanfont/headscale/pull/3036)
+- Fix autogroup:self handling for tagged nodes - tagged nodes no longer incorrectly receive autogroup:self filter rules [#3036](https://github.com/juanfont/headscale/pull/3036)
+- Use CIDR format for autogroup:self destination IPs matching Tailscale behavior [#3036](https://github.com/juanfont/headscale/pull/3036)
+- Merge filter rules with identical SrcIPs and IPProto matching Tailscale behavior - multiple ACL rules with the same source now produce a single FilterRule with combined DstPorts [#3036](https://github.com/juanfont/headscale/pull/3036)
+- Fix exit nodes incorrectly receiving filter rules for destinations that only overlap via exit routes [#3169](https://github.com/juanfont/headscale/issues/3169) [#3175](https://github.com/juanfont/headscale/pull/3175)
+- Fix address-based aliases (hosts, raw IPs) incorrectly expanding to include the matching node's other address family [#2180](https://github.com/juanfont/headscale/pull/2180)
+- Fix identity-based aliases (tags, users, groups) resolving to IPv4 only; they now include both IPv4 and IPv6 matching Tailscale behavior [#2180](https://github.com/juanfont/headscale/pull/2180)
+- Fix wildcard (`*`) source in ACLs now using actually-approved subnet routes instead of autoApprover policy prefixes [#2180](https://github.com/juanfont/headscale/pull/2180)
+- Fix non-wildcard source IPs being dropped when combined with wildcard `*` in the same ACL rule [#2180](https://github.com/juanfont/headscale/pull/2180)
+- Fix exit node approval not triggering filter rule recalculation for peers [#2180](https://github.com/juanfont/headscale/pull/2180)
+- Policy validation error messages now include field context (e.g., `src=`, `dst=`) and are more descriptive [#2180](https://github.com/juanfont/headscale/pull/2180)
+- Reject policies whose `user@` tokens match multiple DB users; rename the duplicate via `headscale users rename` to load [#3160](https://github.com/juanfont/headscale/issues/3160)
+- Evaluate the policy `tests` block on user-initiated writes across both `acls` and `grants`; reject policies whose tests fail (beta) [#1803](https://github.com/juanfont/headscale/issues/1803)
+
+#### Grants
+
+- Add support for policy grants with `ip`, `app`, and `via` fields [#2180](https://github.com/juanfont/headscale/pull/2180)
+- Add `autogroup:danger-all` as a source-only autogroup resolving to all IP addresses [#2180](https://github.com/juanfont/headscale/pull/2180)
+- Add capability grants for Taildrive (`cap/drive`) and peer relay (`cap/relay`) with automatic companion capabilities [#2180](https://github.com/juanfont/headscale/pull/2180)
+- Add per-viewer via route steering — grants with `via` tags control which subnet router or exit node handles traffic for each group of viewers [#2180](https://github.com/juanfont/headscale/pull/2180)
+- Enable Taildrive node attributes on all nodes; actual access is controlled by `cap/drive` grants [#2180](https://github.com/juanfont/headscale/pull/2180)
+
+#### SSH Policy
+
+- Add support for `localpart:*@<domain>` in SSH rule `users` field, mapping each matching user's email local-part as their OS username [#3091](https://github.com/juanfont/headscale/pull/3091)
+- Add SSH `check` action support with OIDC and CLI-based approval flows [#1850](https://github.com/juanfont/headscale/pull/1850)
+
+#### CLI
+
+- Add `headscale auth register`, `headscale auth approve`, and `headscale auth reject` CLI commands [#1850](https://github.com/juanfont/headscale/pull/1850)
+- Deprecate `headscale nodes register --key` in favour of `headscale auth register --auth-id` [#1850](https://github.com/juanfont/headscale/pull/1850)
+- `headscale policy check --bypass-grpc-and-access-database-directly` validates `user@` tokens against the live user database [#3160](https://github.com/juanfont/headscale/issues/3160)
+- Remove deprecated `--namespace` flag from `nodes list`, `nodes register`, and `debug create-node` commands (use `--user` instead) [#3093](https://github.com/juanfont/headscale/pull/3093)
+- Remove deprecated `namespace`/`ns` command aliases for `users` and `machine`/`machines` aliases for `nodes` [#3093](https://github.com/juanfont/headscale/pull/3093)
+- Fix `DestroyUser` deleting all pre-auth keys in the database instead of only the target user's keys [#3155](https://github.com/juanfont/headscale/pull/3155)
+- `headscale policy check` evaluates the `tests` block when invoked with `--bypass-grpc-and-access-database-directly`; without the flag it warns instead of running the tests against empty data [#1803](https://github.com/juanfont/headscale/issues/1803)
+
+#### API
+
+- Add `auth` related routes. The `auth/register` endpoint now expects data as JSON [#1850](https://github.com/juanfont/headscale/pull/1850)
+- Remove gRPC reflection from the remote (TCP) server [#3180](https://github.com/juanfont/headscale/pull/3180)
+
+#### OIDC
+
+- Add a confirmation page before completing node registration, showing the device hostname and machine key fingerprint [#3180](https://github.com/juanfont/headscale/pull/3180)
+- Generalise auth templates into reusable `AuthSuccess` and `AuthWeb` components [#1850](https://github.com/juanfont/headscale/pull/1850)
+- Unify auth pipeline with `AuthVerdict` type, supporting registration, reauthentication, and SSH checks [#1850](https://github.com/juanfont/headscale/pull/1850)
+
+#### Configuration
+
+- Add `node.expiry` configuration option to set a default node key expiry for nodes registered via auth key [#3122](https://github.com/juanfont/headscale/pull/3122)
+  - Tagged nodes (registered with tagged pre-auth keys) are exempt from default expiry
+  - `oidc.expiry` has been removed; use `node.expiry` instead (applies to all registration methods including OIDC)
+  - `ephemeral_node_inactivity_timeout` is deprecated in favour of `node.ephemeral.inactivity_timeout`
+- Add `trusted_proxies` to gate `True-Client-IP` / `X-Real-IP` / `X-Forwarded-For` (previously honoured from any client) [#3268](https://github.com/juanfont/headscale/pull/3268)
+
+#### Debug
+
+- Add node connectivity ping page for verifying control-plane reachability [#3183](https://github.com/juanfont/headscale/pull/3183)
+- Omit secret fields (`Pass`, `ClientSecret`, `APIKey`) from `/debug/config` JSON output [#3180](https://github.com/juanfont/headscale/pull/3180)
+- Route `statsviz` through `tsweb.Protected` [#3180](https://github.com/juanfont/headscale/pull/3180)
+
+#### Other
+
+- Remove old migrations for the debian package [#3185](https://github.com/juanfont/headscale/pull/3185)
+- Install `config-example.yaml` as example for the debian package [#3186](https://github.com/juanfont/headscale/pull/3186)
+- Fix user-owned re-registration with zero client expiry and no default storing `0001-01-01 00:00:00` in the database instead of `NULL` [#3199](https://github.com/juanfont/headscale/pull/3199)
+- Fix `tailscaled` restart on a node with no expiry resetting `NULL` to `0001-01-01 00:00:00` in the database, affecting both tagged and untagged nodes [#3197](https://github.com/juanfont/headscale/pull/3197)
+- Backfill `nodes.expiry` rows persisted by older versions as `0001-01-01 00:00:00` to `NULL`, so nodes upgraded from <0.28 stop reporting as expired [#3284](https://github.com/juanfont/headscale/issues/3284)
+- Update reverse proxy documentation for `trusted_proxies` configuration option [#3292](https://github.com/juanfont/headscale/pull/3292)
+
+## 0.28.0 (2026-02-04)
+
+**Minimum supported Tailscale client version: v1.74.0**
+
+### Tags as identity
+
+Tags are now implemented following the Tailscale model where tags and user ownership are mutually exclusive. Devices can be either
+user-owned (authenticated via web/OIDC) or tagged (authenticated via tagged PreAuthKeys). Tagged devices receive their identity from
+tags rather than users, making them suitable for servers and infrastructure. Applying a tag to a device removes user-based
+ownership. See the [Tailscale tags documentation](https://tailscale.com/docs/features/tags) for details on how tags work.
+
+User-owned nodes can now request tags during registration using `--advertise-tags`. Tags are validated against the `tagOwners` policy
+and applied at registration time. Tags can be managed via the CLI or API after registration. Tagged nodes can return to user-owned
+by re-authenticating with `tailscale up --advertise-tags= --force-reauth`.
+
+A one-time migration will validate and migrate any `RequestTags` (stored in hostinfo) to the tags column. Tags are validated against
+your policy's `tagOwners` rules during migration. [#3011](https://github.com/juanfont/headscale/pull/3011)
+
+### Smarter map updates
+
+The map update system has been rewritten to send smaller, partial updates instead of full network maps whenever possible. This reduces bandwidth usage and improves performance, especially for large networks. The system now properly tracks peer
+changes and can send removal notifications when nodes are removed due to policy changes.
+[#2856](https://github.com/juanfont/headscale/pull/2856) [#2961](https://github.com/juanfont/headscale/pull/2961)
+
+### Pre-authentication key security improvements
+
+Pre-authentication keys now use bcrypt hashing for improved security [#2853](https://github.com/juanfont/headscale/pull/2853). Keys
+are stored as a prefix and bcrypt hash instead of plaintext. The full key is only displayed once at creation time. When listing keys,
+only the prefix is shown (e.g., `hskey-auth-{prefix}-***`). All new keys use the format `hskey-auth-{prefix}-{secret}`. Legacy plaintext keys in the format `{secret}` will continue to work for backwards compatibility.
+
+### Web registration templates redesign
+
+The OIDC callback and device registration web pages have been updated to use the Material for MkDocs design system from the official
+documentation. The templates now use consistent typography, spacing, and colours across all registration flows.
+
+### Database migration support removed for pre-0.25.0 databases
+
+Headscale no longer supports direct upgrades from databases created before version 0.25.0. Users on older versions must upgrade
+sequentially through each stable release, selecting the latest patch version available for each minor release.
+
+### BREAKING
+
+- **API**: The Node message in the gRPC/REST API has been simplified - the `ForcedTags`, `InvalidTags`, and `ValidTags` fields have been removed and replaced with a single `Tags` field that contains the node's applied tags [#2993](https://github.com/juanfont/headscale/pull/2993)
+  - API clients should use the `Tags` field instead of `ValidTags`
+  - The `headscale nodes list` CLI command now always shows a Tags column and the `--tags` flag has been removed
+- **PreAuthKey CLI**: Commands now use ID-based operations instead of user+key combinations [#2992](https://github.com/juanfont/headscale/pull/2992)
+  - `headscale preauthkeys create` no longer requires `--user` flag (optional for tracking creation)
+  - `headscale preauthkeys list` lists all keys (no longer filtered by user)
+  - `headscale preauthkeys expire --id <ID>` replaces `--user <USER> <KEY>`
+  - `headscale preauthkeys delete --id <ID>` replaces `--user <USER> <KEY>`
+
+  **Before:**
+
+  ```bash
+  headscale preauthkeys create --user 1 --reusable --tags tag:server
+  headscale preauthkeys list --user 1
+  headscale preauthkeys expire --user 1 <KEY>
+  headscale preauthkeys delete --user 1 <KEY>
+  ```
+
+  **After:**
+
+  ```bash
+  headscale preauthkeys create --reusable --tags tag:server
+  headscale preauthkeys list
+  headscale preauthkeys expire --id 123
+  headscale preauthkeys delete --id 123
+  ```
+
+- **Tags**: The gRPC `SetTags` endpoint now allows converting user-owned nodes to tagged nodes by setting tags. [#2885](https://github.com/juanfont/headscale/pull/2885)
+- **Tags**: Tags are now resolved from the node's stored Tags field only [#2931](https://github.com/juanfont/headscale/pull/2931)
+  - `--advertise-tags` is processed during registration, not on every policy evaluation
+  - PreAuthKey tagged devices ignore `--advertise-tags` from clients
+  - User-owned nodes can use `--advertise-tags` if authorized by `tagOwners` policy
+  - Tags can be managed via CLI (`headscale nodes tag`) or the SetTags API after registration
+- Database migration support removed for pre-0.25.0 databases [#2883](https://github.com/juanfont/headscale/pull/2883)
+  - If you are running a version older than 0.25.0, you must upgrade to 0.25.1 first, then upgrade to this release
+  - See the [upgrade path documentation](https://headscale.net/stable/about/faq/#what-is-the-recommended-update-path-can-i-skip-multiple-versions-while-updating) for detailed guidance
+  - In version 0.29, all migrations before 0.28.0 will also be removed
+- Remove ability to move nodes between users [#2922](https://github.com/juanfont/headscale/pull/2922)
+  - The `headscale nodes move` CLI command has been removed
+  - The `MoveNode` API endpoint has been removed
+  - Nodes are permanently associated with their user or tag at registration time
+- Add `oidc.email_verified_required` config option to control email verification requirement [#2860](https://github.com/juanfont/headscale/pull/2860)
+  - When `true` (default), only verified emails can authenticate via OIDC in conjunction with `oidc.allowed_domains` or
+    `oidc.allowed_users`. Previous versions allowed to authenticate with an unverified email but did not store the email
+    address in the user profile. This is now rejected during authentication with an `unverified email` error.
+  - When `false`, unverified emails are allowed for OIDC authentication and the email address is stored in the user
+    profile regardless of its verification state.
+- **SSH Policy**: Wildcard (`*`) is no longer supported as an SSH destination [#3009](https://github.com/juanfont/headscale/issues/3009)
+  - Use `autogroup:member` for user-owned devices
+  - Use `autogroup:tagged` for tagged devices
+  - Use specific tags (e.g., `tag:server`) for targeted access
+
+  **Before:**
+
+  ```json
+  { "action": "accept", "src": ["group:admins"], "dst": ["*"], "users": ["root"] }
+  ```
+
+  **After:**
+
+  ```json
+  { "action": "accept", "src": ["group:admins"], "dst": ["autogroup:member", "autogroup:tagged"], "users": ["root"] }
+  ```
+
+- **SSH Policy**: SSH source/destination validation now enforces Tailscale's security model [#3010](https://github.com/juanfont/headscale/issues/3010)
+
+  Per [Tailscale SSH documentation](https://tailscale.com/docs/features/tailscale-ssh), the following rules are now enforced:
+  1. **Tags cannot SSH to user-owned devices**: SSH rules with `tag:*` or `autogroup:tagged` as source cannot have username destinations (e.g., `alice@`) or `autogroup:member`/`autogroup:self` as destination
+  2. **Username destinations require same-user source**: If destination is a specific username (e.g., `alice@`), the source must be that exact same user only. Use `autogroup:self` for same-user SSH access instead
+
+  **Invalid policies now rejected at load time:**
+
+  ```json
+  // INVALID: tag source to user destination
+  {"src": ["tag:server"], "dst": ["alice@"], ...}
+
+  // INVALID: autogroup:tagged to autogroup:member
+  {"src": ["autogroup:tagged"], "dst": ["autogroup:member"], ...}
+
+  // INVALID: group to specific user (use autogroup:self instead)
+  {"src": ["group:admins"], "dst": ["alice@"], ...}
+  ```
+
+  **Valid patterns:**
+
+  ```json
+  // Users/groups can SSH to their own devices via autogroup:self
+  {"src": ["group:admins"], "dst": ["autogroup:self"], ...}
+
+  // Users/groups can SSH to tagged devices
+  {"src": ["group:admins"], "dst": ["autogroup:tagged"], ...}
+
+  // Tagged devices can SSH to other tagged devices
+  {"src": ["autogroup:tagged"], "dst": ["autogroup:tagged"], ...}
+
+  // Same user can SSH to their own devices
+  {"src": ["alice@"], "dst": ["alice@"], ...}
+  ```
+
+### Changes
+
+- Smarter change notifications send partial map updates and node removals instead of full maps [#2961](https://github.com/juanfont/headscale/pull/2961)
+  - Send lightweight endpoint and DERP region updates instead of full maps [#2856](https://github.com/juanfont/headscale/pull/2856)
+- Add NixOS module in repository for faster iteration [#2857](https://github.com/juanfont/headscale/pull/2857)
+- Add favicon to webpages [#2858](https://github.com/juanfont/headscale/pull/2858)
+- Redesign OIDC callback and registration web templates [#2832](https://github.com/juanfont/headscale/pull/2832)
+- Reclaim IPs from the IP allocator when nodes are deleted [#2831](https://github.com/juanfont/headscale/pull/2831)
+- Add bcrypt hashing for pre-authentication keys [#2853](https://github.com/juanfont/headscale/pull/2853)
+- Add prefix to API keys (`hskey-api-{prefix}-{secret}`) [#2853](https://github.com/juanfont/headscale/pull/2853)
+- Add prefix to registration keys for web authentication tracking (`hskey-reg-{random}`) [#2853](https://github.com/juanfont/headscale/pull/2853)
+- Tags can now be tagOwner of other tags [#2930](https://github.com/juanfont/headscale/pull/2930)
+- Add `taildrop.enabled` configuration option to enable/disable Taildrop file sharing [#2955](https://github.com/juanfont/headscale/pull/2955)
+- Allow disabling the metrics server by setting empty `metrics_listen_addr` [#2914](https://github.com/juanfont/headscale/pull/2914)
+- Log ACME/autocert errors for easier debugging [#2933](https://github.com/juanfont/headscale/pull/2933)
+- Improve CLI list output formatting [#2951](https://github.com/juanfont/headscale/pull/2951)
+- Use Debian 13 distroless base images for containers [#2944](https://github.com/juanfont/headscale/pull/2944)
+- Fix ACL policy not applied to new OIDC nodes until client restart [#2890](https://github.com/juanfont/headscale/pull/2890)
+- Fix autogroup:self preventing visibility of nodes matched by other ACL rules [#2882](https://github.com/juanfont/headscale/pull/2882)
+- Fix nodes being rejected after pre-authentication key expiration [#2917](https://github.com/juanfont/headscale/pull/2917)
+- Fix list-routes command respecting identifier filter with JSON output [#2927](https://github.com/juanfont/headscale/pull/2927)
+- Add `--id` flag to expire/delete commands as alternative to `--prefix` for API Keys [#3016](https://github.com/juanfont/headscale/pull/3016)
+
+## 0.27.1 (2025-11-11)
+
+**Minimum supported Tailscale client version: v1.64.0**
+
+### Changes
+
+- Expire nodes with a custom timestamp [#2828](https://github.com/juanfont/headscale/pull/2828)
+- Fix issue where node expiry was reset when tailscaled restarts [#2875](https://github.com/juanfont/headscale/pull/2875)
+- Fix OIDC authentication when multiple login URLs are opened [#2861](https://github.com/juanfont/headscale/pull/2861)
+- Fix node re-registration failing with expired auth keys [#2859](https://github.com/juanfont/headscale/pull/2859)
+- Remove old unused database tables and indices [#2844](https://github.com/juanfont/headscale/pull/2844) [#2872](https://github.com/juanfont/headscale/pull/2872)
+- Ignore litestream tables during database validation [#2843](https://github.com/juanfont/headscale/pull/2843)
+- Fix exit node visibility to respect ACL rules [#2855](https://github.com/juanfont/headscale/pull/2855)
+- Fix SSH policy becoming empty when unknown user is referenced [#2874](https://github.com/juanfont/headscale/pull/2874)
+- Fix policy validation when using bypass-grpc mode [#2854](https://github.com/juanfont/headscale/pull/2854)
+- Fix autogroup:self interaction with other ACL rules [#2842](https://github.com/juanfont/headscale/pull/2842)
+- Fix flaky DERP map shuffle test [#2848](https://github.com/juanfont/headscale/pull/2848)
+- Use current stable base images for Debian and Alpine containers [#2827](https://github.com/juanfont/headscale/pull/2827)
+
+## 0.27.0 (2025-10-27)
+
+**Minimum supported Tailscale client version: v1.64.0**
+
+### Database integrity improvements
+
+This release includes a significant database migration that addresses
+longstanding issues with the database schema and data integrity that has
+accumulated over the years. The migration introduces a `schema.sql` file as the
+source of truth for the expected database schema to ensure new migrations that
+will cause divergence does not occur again.
+
+These issues arose from a combination of factors discovered over time: SQLite
+foreign keys not being enforced for many early versions, all migrations being
+run in one large function until version 0.23.0, and inconsistent use of GORM's
+AutoMigrate feature. Moving forward, all new migrations will be explicit SQL
+operations rather than relying on GORM AutoMigrate, and foreign keys will be
+enforced throughout the migration process.
+
+We are only improving SQLite databases with this change - PostgreSQL databases
+are not affected.
+
+Please read the
+[PR description](https://github.com/juanfont/headscale/pull/2617) for more
+technical details about the issues and solutions.
+
+**SQLite Database Backup Example:**
+
+```bash
+# Stop headscale
+systemctl stop headscale
+
+# Backup sqlite database
+cp /var/lib/headscale/db.sqlite /var/lib/headscale/db.sqlite.backup
+
+# Backup sqlite WAL/SHM files (if they exist)
+cp /var/lib/headscale/db.sqlite-wal /var/lib/headscale/db.sqlite-wal.backup
+cp /var/lib/headscale/db.sqlite-shm /var/lib/headscale/db.sqlite-shm.backup
+
+# Start headscale (migration will run automatically)
+systemctl start headscale
+```
+
+### DERPMap update frequency
+
+The default DERPMap update frequency has been changed from 24 hours to 3 hours.
+If you set the `derp.update_frequency` configuration option, it is recommended
+to change it to `3h` to ensure that the headscale instance gets the latest
+DERPMap updates when upstream is changed.
+
+### Autogroups
+
+This release adds support for the three missing autogroups: `self`
+(experimental), `member`, and `tagged`. Please refer to the
+[documentation](https://tailscale.com/docs/reference/targets-and-selectors#autogroups)
+for a detailed explanation.
+
+`autogroup:self` is marked as experimental and should be used with caution, but
+we need help testing it. Experimental here means two things; first, generating
+the packet filter from policies that use `autogroup:self` is very expensive, and
+it might perform, or straight up not work on Headscale installations with a
+large number of nodes. Second, the implementation might have bugs or edge cases
+we are not aware of, meaning that nodes or users might gain _more_ access than
+expected. Please report bugs.
+
+### Node store (in memory database)
+
+Under the hood, we have added a new datastructure to store nodes in memory. This
+datastructure is called `NodeStore` and aims to reduce the reading and writing
+of nodes to the database layer. We have not benchmarked it, but expect it to
+improve performance for read heavy workloads. We think of it as, "worst case" we
+have moved the bottle neck somewhere else, and "best case" we should see a good
+improvement in compute resource usage at the expense of memory usage. We are
+quite excited for this change and think it will make it easier for us to improve
+the code base over time and make it more correct and efficient.
+
+### BREAKING
+
+- Remove support for 32-bit binaries [#2692](https://github.com/juanfont/headscale/pull/2692)
+- Policy: Zero or empty destination port is no longer allowed [#2606](https://github.com/juanfont/headscale/pull/2606)
+- Stricter hostname validation [#2383](https://github.com/juanfont/headscale/pull/2383)
+  - Hostnames must be valid DNS labels (2-63 characters, alphanumeric and
+    hyphens only, cannot start/end with hyphen)
+  - **Client Registration (New Nodes)**: Invalid hostnames are automatically
+    renamed to `invalid-XXXXXX` format
+    - `my-laptop` → accepted as-is
+    - `My-Laptop` → `my-laptop` (lowercased)
+    - `my_laptop` → `invalid-a1b2c3` (underscore not allowed)
+    - `test@host` → `invalid-d4e5f6` (@ not allowed)
+    - `laptop-🚀` → `invalid-j1k2l3` (emoji not allowed)
+  - **Hostinfo Updates / CLI**: Invalid hostnames are rejected with an error
+    - Valid names are accepted or lowercased
+    - Names with invalid characters, too short (<2), too long (>63), or
+      starting/ending with hyphen are rejected
+
+### Changes
+
+- **Database schema migration improvements for SQLite** [#2617](https://github.com/juanfont/headscale/pull/2617)
+  - **IMPORTANT: Backup your SQLite database before upgrading**
+  - Introduces safer table renaming migration strategy
+  - Addresses longstanding database integrity issues
+- Add flag to directly manipulate the policy in the database [#2765](https://github.com/juanfont/headscale/pull/2765)
+- DERPmap update frequency default changed from 24h to 3h [#2741](https://github.com/juanfont/headscale/pull/2741)
+- DERPmap update mechanism has been improved with retry, and is now failing
+  conservatively, preserving the old map upon failure.
+  [#2741](https://github.com/juanfont/headscale/pull/2741)
+- Add support for `autogroup:member`, `autogroup:tagged` [#2572](https://github.com/juanfont/headscale/pull/2572)
+- Fix bug where return routes were being removed by policy [#2767](https://github.com/juanfont/headscale/pull/2767)
+- Remove policy v1 code [#2600](https://github.com/juanfont/headscale/pull/2600)
+- Refactor Debian/Ubuntu packaging and drop support for Ubuntu 20.04. [#2614](https://github.com/juanfont/headscale/pull/2614)
+- Remove redundant check regarding `noise` config [#2658](https://github.com/juanfont/headscale/pull/2658)
+- Refactor OpenID Connect documentation [#2625](https://github.com/juanfont/headscale/pull/2625)
+- Don't crash if config file is missing [#2656](https://github.com/juanfont/headscale/pull/2656)
+- Adds `/robots.txt` endpoint to avoid crawlers [#2643](https://github.com/juanfont/headscale/pull/2643)
+- OIDC: Use group claim from UserInfo [#2663](https://github.com/juanfont/headscale/pull/2663)
+- OIDC: Update user with claims from UserInfo _before_ comparing with allowed
+  groups, email and domain
+  [#2663](https://github.com/juanfont/headscale/pull/2663)
+- Policy will now reject invalid fields, making it easier to spot spelling
+  errors [#2764](https://github.com/juanfont/headscale/pull/2764)
+- Add FAQ entry on how to recover from an invalid policy in the database [#2776](https://github.com/juanfont/headscale/pull/2776)
+- EXPERIMENTAL: Add support for `autogroup:self` [#2789](https://github.com/juanfont/headscale/pull/2789)
+- Add healthcheck command [#2659](https://github.com/juanfont/headscale/pull/2659)
+
+## 0.26.1 (2025-06-06)
+
+### Changes
+
+- Ensure nodes are matching both node key and machine key when connecting. [#2642](https://github.com/juanfont/headscale/pull/2642)
 
 ## 0.26.0 (2025-05-14)
 
@@ -46,12 +753,9 @@ ID | Hostname           | Approved        | Available       | Serving (Primary)
 Note that if an exit route is approved (0.0.0.0/0 or ::/0), both IPv4 and IPv6
 will be approved.
 
-- Route API and CLI has been removed
-  [#2422](https://github.com/juanfont/headscale/pull/2422)
-- Routes are now managed via the Node API
-  [#2422](https://github.com/juanfont/headscale/pull/2422)
-- Only routes accessible to the node will be sent to the node
-  [#2561](https://github.com/juanfont/headscale/pull/2561)
+- Route API and CLI has been removed [#2422](https://github.com/juanfont/headscale/pull/2422)
+- Routes are now managed via the Node API [#2422](https://github.com/juanfont/headscale/pull/2422)
+- Only routes accessible to the node will be sent to the node [#2561](https://github.com/juanfont/headscale/pull/2561)
 
 #### Policy v2
 
@@ -72,7 +776,7 @@ new policy code passes all of our tests.
 - Error messages should be more descriptive and informative.
   - There is still work to be here, but it is already improved with "typing"
     (e.g. only Users can be put in Groups)
-- All users must contain an `@` character.
+- All users in the policy must contain an `@` character.
   - If your user naturally contains and `@`, like an email, this will just work.
   - If its based on usernames, or other identifiers not containing an `@`, an
     `@` should be appended at the end. For example, if your user is `john`, it
@@ -105,7 +809,7 @@ The SSH policy has been reworked to be more consistent with the rest of the
 policy. In addition, several inconsistencies between our implementation and
 Tailscale's upstream has been closed and this might be a breaking change for
 some users. Please refer to the
-[upstream documentation](https://tailscale.com/kb/1337/acl-syntax#tailscale-ssh)
+[upstream documentation](https://tailscale.com/docs/reference/syntax/policy-file#tailscale-ssh)
 for more information on which types are allowed in `src`, `dst` and `users`.
 
 There is one large inconsistency left, we allow `*` as a destination as we
@@ -123,12 +827,9 @@ working in v1 and not tested might be broken in v2 (and vice versa).
 
 #### Other breaking changes
 
-- Disallow `server_url` and `base_domain` to be equal
-  [#2544](https://github.com/juanfont/headscale/pull/2544)
-- Return full user in API for pre auth keys instead of string
-  [#2542](https://github.com/juanfont/headscale/pull/2542)
-- Pre auth key API/CLI now uses ID over username
-  [#2542](https://github.com/juanfont/headscale/pull/2542)
+- Disallow `server_url` and `base_domain` to be equal [#2544](https://github.com/juanfont/headscale/pull/2544)
+- Return full user in API for pre auth keys instead of string [#2542](https://github.com/juanfont/headscale/pull/2542)
+- Pre auth key API/CLI now uses ID over username [#2542](https://github.com/juanfont/headscale/pull/2542)
 - A non-empty list of global nameservers needs to be specified via
   `dns.nameservers.global` if the configuration option `dns.override_local_dns`
   is enabled or is not specified in the configuration file. This aligns with
@@ -138,50 +839,37 @@ working in v1 and not tested might be broken in v2 (and vice versa).
 ### Changes
 
 - Use Go 1.24 [#2427](https://github.com/juanfont/headscale/pull/2427)
-- Add `headscale policy check` command to check policy
-  [#2553](https://github.com/juanfont/headscale/pull/2553)
-- `oidc.map_legacy_users` and `oidc.strip_email_domain` has been removed
-  [#2411](https://github.com/juanfont/headscale/pull/2411)
-- Add more information to `/debug` endpoint
-  [#2420](https://github.com/juanfont/headscale/pull/2420)
+- Add `headscale policy check` command to check policy [#2553](https://github.com/juanfont/headscale/pull/2553)
+- `oidc.map_legacy_users` and `oidc.strip_email_domain` has been removed [#2411](https://github.com/juanfont/headscale/pull/2411)
+- Add more information to `/debug` endpoint [#2420](https://github.com/juanfont/headscale/pull/2420)
   - It is now possible to inspect running goroutines and take profiles
   - View of config, policy, filter, ssh policy per node, connected nodes and
     DERPmap
-- OIDC: Fetch UserInfo to get EmailVerified if necessary
-  [#2493](https://github.com/juanfont/headscale/pull/2493)
+- OIDC: Fetch UserInfo to get EmailVerified if necessary [#2493](https://github.com/juanfont/headscale/pull/2493)
   - If a OIDC provider doesn't include the `email_verified` claim in its ID
     tokens, Headscale will attempt to get it from the UserInfo endpoint.
-- OIDC: Try to populate name, email and username from UserInfo
-  [#2545](https://github.com/juanfont/headscale/pull/2545)
+- OIDC: Try to populate name, email and username from UserInfo [#2545](https://github.com/juanfont/headscale/pull/2545)
 - Improve performance by only querying relevant nodes from the database for node
   updates [#2509](https://github.com/juanfont/headscale/pull/2509)
 - node FQDNs in the netmap will now contain a dot (".") at the end. This aligns
   with behaviour of tailscale.com
   [#2503](https://github.com/juanfont/headscale/pull/2503)
-- Restore support for "Override local DNS"
-  [#2438](https://github.com/juanfont/headscale/pull/2438)
-- Add documentation for routes
-  [#2496](https://github.com/juanfont/headscale/pull/2496)
-- Add support for `autogroup:member`, `autogroup:tagged`
-  [#2572](https://github.com/juanfont/headscale/pull/2572)
+- Restore support for "Override local DNS" [#2438](https://github.com/juanfont/headscale/pull/2438)
+- Add documentation for routes [#2496](https://github.com/juanfont/headscale/pull/2496)
 
 ## 0.25.1 (2025-02-25)
 
 ### Changes
 
-- Fix issue where registration errors are sent correctly
-  [#2435](https://github.com/juanfont/headscale/pull/2435)
-- Fix issue where routes passed on registration were not saved
-  [#2444](https://github.com/juanfont/headscale/pull/2444)
-- Fix issue where registration page was displayed twice
-  [#2445](https://github.com/juanfont/headscale/pull/2445)
+- Fix issue where registration errors are sent correctly [#2435](https://github.com/juanfont/headscale/pull/2435)
+- Fix issue where routes passed on registration were not saved [#2444](https://github.com/juanfont/headscale/pull/2444)
+- Fix issue where registration page was displayed twice [#2445](https://github.com/juanfont/headscale/pull/2445)
 
 ## 0.25.0 (2025-02-11)
 
 ### BREAKING
 
-- Authentication flow has been rewritten
-  [#2374](https://github.com/juanfont/headscale/pull/2374) This change should be
+- Authentication flow has been rewritten [#2374](https://github.com/juanfont/headscale/pull/2374) This change should be
   transparent to users with the exception of some buxfixes that has been
   discovered and was fixed as part of the rewrite.
   - When a node is registered with _a new user_, it will be registered as a new
@@ -189,62 +877,44 @@ working in v1 and not tested might be broken in v2 (and vice versa).
     [#1310](https://github.com/juanfont/headscale/issues/1310)).
   - A logged out node logging in with the same user will replace the existing
     node.
-- Remove support for Tailscale clients older than 1.62 (Capability version 87)
-  [#2405](https://github.com/juanfont/headscale/pull/2405)
+- Remove support for Tailscale clients older than 1.62 (Capability version 87) [#2405](https://github.com/juanfont/headscale/pull/2405)
 
 ### Changes
 
-- `oidc.map_legacy_users` is now `false` by default
-  [#2350](https://github.com/juanfont/headscale/pull/2350)
-- Print Tailscale version instead of capability versions for outdated nodes
-  [#2391](https://github.com/juanfont/headscale/pull/2391)
-- Do not allow renaming of users from OIDC
-  [#2393](https://github.com/juanfont/headscale/pull/2393)
-- Change minimum hostname length to 2
-  [#2393](https://github.com/juanfont/headscale/pull/2393)
-- Fix migration error caused by nodes having invalid auth keys
-  [#2412](https://github.com/juanfont/headscale/pull/2412)
-- Pre auth keys belonging to a user are no longer deleted with the user
-  [#2396](https://github.com/juanfont/headscale/pull/2396)
-- Pre auth keys that are used by a node can no longer be deleted
-  [#2396](https://github.com/juanfont/headscale/pull/2396)
-- Rehaul HTTP errors, return better status code and errors to users
-  [#2398](https://github.com/juanfont/headscale/pull/2398)
-- Print headscale version and commit on server startup
-  [#2415](https://github.com/juanfont/headscale/pull/2415)
+- `oidc.map_legacy_users` is now `false` by default [#2350](https://github.com/juanfont/headscale/pull/2350)
+- Print Tailscale version instead of capability versions for outdated nodes [#2391](https://github.com/juanfont/headscale/pull/2391)
+- Do not allow renaming of users from OIDC [#2393](https://github.com/juanfont/headscale/pull/2393)
+- Change minimum hostname length to 2 [#2393](https://github.com/juanfont/headscale/pull/2393)
+- Fix migration error caused by nodes having invalid auth keys [#2412](https://github.com/juanfont/headscale/pull/2412)
+- Pre auth keys belonging to a user are no longer deleted with the user [#2396](https://github.com/juanfont/headscale/pull/2396)
+- Pre auth keys that are used by a node can no longer be deleted [#2396](https://github.com/juanfont/headscale/pull/2396)
+- Rehaul HTTP errors, return better status code and errors to users [#2398](https://github.com/juanfont/headscale/pull/2398)
+- Print headscale version and commit on server startup [#2415](https://github.com/juanfont/headscale/pull/2415)
 
 ## 0.24.3 (2025-02-07)
 
 ### Changes
 
-- Fix migration error caused by nodes having invalid auth keys
-  [#2412](https://github.com/juanfont/headscale/pull/2412)
-- Pre auth keys belonging to a user are no longer deleted with the user
-  [#2396](https://github.com/juanfont/headscale/pull/2396)
-- Pre auth keys that are used by a node can no longer be deleted
-  [#2396](https://github.com/juanfont/headscale/pull/2396)
+- Fix migration error caused by nodes having invalid auth keys [#2412](https://github.com/juanfont/headscale/pull/2412)
+- Pre auth keys belonging to a user are no longer deleted with the user [#2396](https://github.com/juanfont/headscale/pull/2396)
+- Pre auth keys that are used by a node can no longer be deleted [#2396](https://github.com/juanfont/headscale/pull/2396)
 
 ## 0.24.2 (2025-01-30)
 
 ### Changes
 
-- Fix issue where email and username being equal fails to match in Policy
-  [#2388](https://github.com/juanfont/headscale/pull/2388)
-- Delete invalid routes before adding a NOT NULL constraint on node_id
-  [#2386](https://github.com/juanfont/headscale/pull/2386)
+- Fix issue where email and username being equal fails to match in Policy [#2388](https://github.com/juanfont/headscale/pull/2388)
+- Delete invalid routes before adding a NOT NULL constraint on node_id [#2386](https://github.com/juanfont/headscale/pull/2386)
 
 ## 0.24.1 (2025-01-23)
 
 ### Changes
 
-- Fix migration issue with user table for PostgreSQL
-  [#2367](https://github.com/juanfont/headscale/pull/2367)
-- Relax username validation to allow emails
-  [#2364](https://github.com/juanfont/headscale/pull/2364)
+- Fix migration issue with user table for PostgreSQL [#2367](https://github.com/juanfont/headscale/pull/2367)
+- Relax username validation to allow emails [#2364](https://github.com/juanfont/headscale/pull/2364)
 - Remove invalid routes and add stronger constraints for routes to avoid API
   panic [#2371](https://github.com/juanfont/headscale/pull/2371)
-- Fix panic when `derp.update_frequency` is 0
-  [#2368](https://github.com/juanfont/headscale/pull/2368)
+- Fix panic when `derp.update_frequency` is 0 [#2368](https://github.com/juanfont/headscale/pull/2368)
 
 ## 0.24.0 (2025-01-17)
 
@@ -381,12 +1051,10 @@ This will also affect the way you
 
 ### BREAKING
 
-- Remove `dns.use_username_in_magic_dns` configuration option
-  [#2020](https://github.com/juanfont/headscale/pull/2020),
+- Remove `dns.use_username_in_magic_dns` configuration option [#2020](https://github.com/juanfont/headscale/pull/2020),
   [#2279](https://github.com/juanfont/headscale/pull/2279)
   - Having usernames in magic DNS is no longer possible.
-- Remove versions older than 1.56
-  [#2149](https://github.com/juanfont/headscale/pull/2149)
+- Remove versions older than 1.56 [#2149](https://github.com/juanfont/headscale/pull/2149)
   - Clean up old code required by old versions
 - User gRPC/API [#2261](https://github.com/juanfont/headscale/pull/2261):
   - If you depend on a Headscale Web UI, you should wait with this update until
@@ -399,27 +1067,20 @@ This will also affect the way you
 
 - Improved compatibility of built-in DERP server with clients connecting over
   WebSocket [#2132](https://github.com/juanfont/headscale/pull/2132)
-- Allow nodes to use SSH agent forwarding
-  [#2145](https://github.com/juanfont/headscale/pull/2145)
-- Fixed processing of fields in post request in MoveNode rpc
-  [#2179](https://github.com/juanfont/headscale/pull/2179)
+- Allow nodes to use SSH agent forwarding [#2145](https://github.com/juanfont/headscale/pull/2145)
+- Fixed processing of fields in post request in MoveNode rpc [#2179](https://github.com/juanfont/headscale/pull/2179)
 - Added conversion of 'Hostname' to 'givenName' in a node with FQDN rules
   applied [#2198](https://github.com/juanfont/headscale/pull/2198)
-- Fixed updating of hostname and givenName when it is updated in HostInfo
-  [#2199](https://github.com/juanfont/headscale/pull/2199)
-- Fixed missing `stable-debug` container tag
-  [#2232](https://github.com/juanfont/headscale/pull/2232)
+- Fixed updating of hostname and givenName when it is updated in HostInfo [#2199](https://github.com/juanfont/headscale/pull/2199)
+- Fixed missing `stable-debug` container tag [#2232](https://github.com/juanfont/headscale/pull/2232)
 - Loosened up `server_url` and `base_domain` check. It was overly strict in some
   cases. [#2248](https://github.com/juanfont/headscale/pull/2248)
 - CLI for managing users now accepts `--identifier` in addition to `--name`,
   usage of `--identifier` is recommended
   [#2261](https://github.com/juanfont/headscale/pull/2261)
-- Add `dns.extra_records_path` configuration option
-  [#2262](https://github.com/juanfont/headscale/issues/2262)
-- Support client verify for DERP
-  [#2046](https://github.com/juanfont/headscale/pull/2046)
-- Add PKCE Verifier for OIDC
-  [#2314](https://github.com/juanfont/headscale/pull/2314)
+- Add `dns.extra_records_path` configuration option [#2262](https://github.com/juanfont/headscale/issues/2262)
+- Support client verify for DERP [#2046](https://github.com/juanfont/headscale/pull/2046)
+- Add PKCE Verifier for OIDC [#2314](https://github.com/juanfont/headscale/pull/2314)
 
 ## 0.23.0 (2024-09-18)
 
@@ -483,32 +1144,26 @@ part of adopting [#1460](https://github.com/juanfont/headscale/pull/1460).
   - Old structure has been remove and the configuration _must_ be converted.
   - Adds additional configuration for PostgreSQL for setting max open, idle
     connection and idle connection lifetime.
-- API: Machine is now Node
-  [#1553](https://github.com/juanfont/headscale/pull/1553)
-- Remove support for older Tailscale clients
-  [#1611](https://github.com/juanfont/headscale/pull/1611)
+- API: Machine is now Node [#1553](https://github.com/juanfont/headscale/pull/1553)
+- Remove support for older Tailscale clients [#1611](https://github.com/juanfont/headscale/pull/1611)
   - The oldest supported client is 1.42
-- Headscale checks that _at least_ one DERP is defined at start
-  [#1564](https://github.com/juanfont/headscale/pull/1564)
+- Headscale checks that _at least_ one DERP is defined at start [#1564](https://github.com/juanfont/headscale/pull/1564)
   - If no DERP is configured, the server will fail to start, this can be because
     it cannot load the DERPMap from file or url.
-- Embedded DERP server requires a private key
-  [#1611](https://github.com/juanfont/headscale/pull/1611)
+- Embedded DERP server requires a private key [#1611](https://github.com/juanfont/headscale/pull/1611)
   - Add a filepath entry to
     [`derp.server.private_key_path`](https://github.com/juanfont/headscale/blob/b35993981297e18393706b2c963d6db882bba6aa/config-example.yaml#L95)
-- Docker images are now built with goreleaser (ko)
-  [#1716](https://github.com/juanfont/headscale/pull/1716)
+- Docker images are now built with goreleaser (ko) [#1716](https://github.com/juanfont/headscale/pull/1716)
   [#1763](https://github.com/juanfont/headscale/pull/1763)
   - Entrypoint of container image has changed from shell to headscale, require
     change from `headscale serve` to `serve`
   - `/var/lib/headscale` and `/var/run/headscale` is no longer created
     automatically, see [container docs](./docs/setup/install/container.md)
-- Prefixes are now defined per v4 and v6 range.
-  [#1756](https://github.com/juanfont/headscale/pull/1756)
+- Prefixes are now defined per v4 and v6 range. [#1756](https://github.com/juanfont/headscale/pull/1756)
   - `ip_prefixes` option is now `prefixes.v4` and `prefixes.v6`
   - `prefixes.allocation` can be set to assign IPs at `sequential` or `random`.
     [#1869](https://github.com/juanfont/headscale/pull/1869)
-- MagicDNS domains no longer contain usernames []()
+- MagicDNS domains no longer contain usernames
   - This is in preparation to fix Headscales implementation of tags which
     currently does not correctly remove the link between a tagged device and a
     user. As tagged devices will not have a user, this will require a change to
@@ -519,30 +1174,23 @@ part of adopting [#1460](https://github.com/juanfont/headscale/pull/1460).
     note that this option _will be removed_ when tags are fixed.
     - dns.base_domain can no longer be the same as (or part of) server_url.
     - This option brings Headscales behaviour in line with Tailscale.
-- YAML files are no longer supported for headscale policy.
-  [#1792](https://github.com/juanfont/headscale/pull/1792)
+- YAML files are no longer supported for headscale policy. [#1792](https://github.com/juanfont/headscale/pull/1792)
   - HuJSON is now the only supported format for policy.
-- DNS configuration has been restructured
-  [#2034](https://github.com/juanfont/headscale/pull/2034)
+- DNS configuration has been restructured [#2034](https://github.com/juanfont/headscale/pull/2034)
   - Please review the new [config-example.yaml](./config-example.yaml) for the
     new structure.
 
 ### Changes
 
-- Use versioned migrations
-  [#1644](https://github.com/juanfont/headscale/pull/1644)
-- Make the OIDC callback page better
-  [#1484](https://github.com/juanfont/headscale/pull/1484)
+- Use versioned migrations [#1644](https://github.com/juanfont/headscale/pull/1644)
+- Make the OIDC callback page better [#1484](https://github.com/juanfont/headscale/pull/1484)
 - SSH support [#1487](https://github.com/juanfont/headscale/pull/1487)
-- State management has been improved
-  [#1492](https://github.com/juanfont/headscale/pull/1492)
-- Use error group handling to ensure tests actually pass
-  [#1535](https://github.com/juanfont/headscale/pull/1535) based on
+- State management has been improved [#1492](https://github.com/juanfont/headscale/pull/1492)
+- Use error group handling to ensure tests actually pass [#1535](https://github.com/juanfont/headscale/pull/1535) based on
   [#1460](https://github.com/juanfont/headscale/pull/1460)
 - Fix hang on SIGTERM [#1492](https://github.com/juanfont/headscale/pull/1492)
   taken from [#1480](https://github.com/juanfont/headscale/pull/1480)
-- Send logs to stderr by default
-  [#1524](https://github.com/juanfont/headscale/pull/1524)
+- Send logs to stderr by default [#1524](https://github.com/juanfont/headscale/pull/1524)
 - Fix [TS-2023-006](https://tailscale.com/security-bulletins/#ts-2023-006)
   security UPnP issue [#1563](https://github.com/juanfont/headscale/pull/1563)
 - Turn off gRPC logging [#1640](https://github.com/juanfont/headscale/pull/1640)
@@ -550,21 +1198,15 @@ part of adopting [#1460](https://github.com/juanfont/headscale/pull/1460).
 - Added the possibility to manually create a DERP-map entry which can be
   customized, instead of automatically creating it.
   [#1565](https://github.com/juanfont/headscale/pull/1565)
-- Add support for deleting api keys
-  [#1702](https://github.com/juanfont/headscale/pull/1702)
+- Add support for deleting api keys [#1702](https://github.com/juanfont/headscale/pull/1702)
 - Add command to backfill IP addresses for nodes missing IPs from configured
   prefixes. [#1869](https://github.com/juanfont/headscale/pull/1869)
-- Log available update as warning
-  [#1877](https://github.com/juanfont/headscale/pull/1877)
-- Add `autogroup:internet` to Policy
-  [#1917](https://github.com/juanfont/headscale/pull/1917)
-- Restore foreign keys and add constraints
-  [#1562](https://github.com/juanfont/headscale/pull/1562)
+- Log available update as warning [#1877](https://github.com/juanfont/headscale/pull/1877)
+- Add `autogroup:internet` to Policy [#1917](https://github.com/juanfont/headscale/pull/1917)
+- Restore foreign keys and add constraints [#1562](https://github.com/juanfont/headscale/pull/1562)
 - Make registration page easier to use on mobile devices
-- Make write-ahead-log default on and configurable for SQLite
-  [#1985](https://github.com/juanfont/headscale/pull/1985)
-- Add APIs for managing headscale policy.
-  [#1792](https://github.com/juanfont/headscale/pull/1792)
+- Make write-ahead-log default on and configurable for SQLite [#1985](https://github.com/juanfont/headscale/pull/1985)
+- Add APIs for managing headscale policy. [#1792](https://github.com/juanfont/headscale/pull/1792)
 - Fix for registering nodes using preauthkeys when running on a postgres
   database in a non-UTC timezone.
   [#764](https://github.com/juanfont/headscale/issues/764)
@@ -572,33 +1214,25 @@ part of adopting [#1460](https://github.com/juanfont/headscale/pull/1460).
 - CLI commands (all except `serve`) only requires minimal configuration, no more
   errors or warnings from unset settings
   [#2109](https://github.com/juanfont/headscale/pull/2109)
-- CLI results are now concistently sent to stdout and errors to stderr
-  [#2109](https://github.com/juanfont/headscale/pull/2109)
-- Fix issue where shutting down headscale would hang
-  [#2113](https://github.com/juanfont/headscale/pull/2113)
+- CLI results are now concistently sent to stdout and errors to stderr [#2109](https://github.com/juanfont/headscale/pull/2109)
+- Fix issue where shutting down headscale would hang [#2113](https://github.com/juanfont/headscale/pull/2113)
 
 ## 0.22.3 (2023-05-12)
 
 ### Changes
 
-- Added missing ca-certificates in Docker image
-  [#1463](https://github.com/juanfont/headscale/pull/1463)
+- Added missing ca-certificates in Docker image [#1463](https://github.com/juanfont/headscale/pull/1463)
 
 ## 0.22.2 (2023-05-10)
 
 ### Changes
 
-- Add environment flags to enable pprof (profiling)
-  [#1382](https://github.com/juanfont/headscale/pull/1382)
+- Add environment flags to enable pprof (profiling) [#1382](https://github.com/juanfont/headscale/pull/1382)
   - Profiles are continuously generated in our integration tests.
-- Fix systemd service file location in `.deb` packages
-  [#1391](https://github.com/juanfont/headscale/pull/1391)
-- Improvements on Noise implementation
-  [#1379](https://github.com/juanfont/headscale/pull/1379)
-- Replace node filter logic, ensuring nodes with access can see each other
-  [#1381](https://github.com/juanfont/headscale/pull/1381)
-- Disable (or delete) both exit routes at the same time
-  [#1428](https://github.com/juanfont/headscale/pull/1428)
+- Fix systemd service file location in `.deb` packages [#1391](https://github.com/juanfont/headscale/pull/1391)
+- Improvements on Noise implementation [#1379](https://github.com/juanfont/headscale/pull/1379)
+- Replace node filter logic, ensuring nodes with access can see each other [#1381](https://github.com/juanfont/headscale/pull/1381)
+- Disable (or delete) both exit routes at the same time [#1428](https://github.com/juanfont/headscale/pull/1428)
 - Ditch distroless for Docker image, create default socket dir in
   `/var/run/headscale` [#1450](https://github.com/juanfont/headscale/pull/1450)
 
@@ -606,65 +1240,49 @@ part of adopting [#1460](https://github.com/juanfont/headscale/pull/1460).
 
 ### Changes
 
-- Fix issue where systemd could not bind to port 80
-  [#1365](https://github.com/juanfont/headscale/pull/1365)
+- Fix issue where systemd could not bind to port 80 [#1365](https://github.com/juanfont/headscale/pull/1365)
 
 ## 0.22.0 (2023-04-20)
 
 ### Changes
 
-- Add `.deb` packages to release process
-  [#1297](https://github.com/juanfont/headscale/pull/1297)
-- Update and simplify the documentation to use new `.deb` packages
-  [#1349](https://github.com/juanfont/headscale/pull/1349)
-- Add 32-bit Arm platforms to release process
-  [#1297](https://github.com/juanfont/headscale/pull/1297)
+- Add `.deb` packages to release process [#1297](https://github.com/juanfont/headscale/pull/1297)
+- Update and simplify the documentation to use new `.deb` packages [#1349](https://github.com/juanfont/headscale/pull/1349)
+- Add 32-bit Arm platforms to release process [#1297](https://github.com/juanfont/headscale/pull/1297)
 - Fix longstanding bug that would prevent "\*" from working properly in ACLs
   (issue [#699](https://github.com/juanfont/headscale/issues/699))
   [#1279](https://github.com/juanfont/headscale/pull/1279)
-- Fix issue where IPv6 could not be used in, or while using ACLs (part of
-  [#809](https://github.com/juanfont/headscale/issues/809))
+- Fix issue where IPv6 could not be used in, or while using ACLs (part of [#809](https://github.com/juanfont/headscale/issues/809))
   [#1339](https://github.com/juanfont/headscale/pull/1339)
-- Target Go 1.20 and Tailscale 1.38 for Headscale
-  [#1323](https://github.com/juanfont/headscale/pull/1323)
+- Target Go 1.20 and Tailscale 1.38 for Headscale [#1323](https://github.com/juanfont/headscale/pull/1323)
 
 ## 0.21.0 (2023-03-20)
 
 ### Changes
 
-- Adding "configtest" CLI command.
-  [#1230](https://github.com/juanfont/headscale/pull/1230)
-- Add documentation on connecting with iOS to `/apple`
-  [#1261](https://github.com/juanfont/headscale/pull/1261)
-- Update iOS compatibility and added documentation for iOS
-  [#1264](https://github.com/juanfont/headscale/pull/1264)
-- Allow to delete routes
-  [#1244](https://github.com/juanfont/headscale/pull/1244)
+- Adding "configtest" CLI command. [#1230](https://github.com/juanfont/headscale/pull/1230)
+- Add documentation on connecting with iOS to `/apple` [#1261](https://github.com/juanfont/headscale/pull/1261)
+- Update iOS compatibility and added documentation for iOS [#1264](https://github.com/juanfont/headscale/pull/1264)
+- Allow to delete routes [#1244](https://github.com/juanfont/headscale/pull/1244)
 
 ## 0.20.0 (2023-02-03)
 
 ### Changes
 
-- Fix wrong behaviour in exit nodes
-  [#1159](https://github.com/juanfont/headscale/pull/1159)
-- Align behaviour of `dns_config.restricted_nameservers` to tailscale
-  [#1162](https://github.com/juanfont/headscale/pull/1162)
-- Make OpenID Connect authenticated client expiry time configurable
-  [#1191](https://github.com/juanfont/headscale/pull/1191)
+- Fix wrong behaviour in exit nodes [#1159](https://github.com/juanfont/headscale/pull/1159)
+- Align behaviour of `dns_config.restricted_nameservers` to tailscale [#1162](https://github.com/juanfont/headscale/pull/1162)
+- Make OpenID Connect authenticated client expiry time configurable [#1191](https://github.com/juanfont/headscale/pull/1191)
   - defaults to 180 days like Tailscale SaaS
   - adds option to use the expiry time from the OpenID token for the node (see
     config-example.yaml)
-- Set ControlTime in Map info sent to nodes
-  [#1195](https://github.com/juanfont/headscale/pull/1195)
-- Populate Tags field on Node updates sent
-  [#1195](https://github.com/juanfont/headscale/pull/1195)
+- Set ControlTime in Map info sent to nodes [#1195](https://github.com/juanfont/headscale/pull/1195)
+- Populate Tags field on Node updates sent [#1195](https://github.com/juanfont/headscale/pull/1195)
 
 ## 0.19.0 (2023-01-29)
 
 ### BREAKING
 
-- Rename Namespace to User
-  [#1144](https://github.com/juanfont/headscale/pull/1144)
+- Rename Namespace to User [#1144](https://github.com/juanfont/headscale/pull/1144)
   - **BACKUP your database before upgrading**
 - Command line flags previously taking `--namespace` or `-n` will now require
   `--user` or `-u`
@@ -673,35 +1291,23 @@ part of adopting [#1460](https://github.com/juanfont/headscale/pull/1460).
 
 ### Changes
 
-- Reworked routing and added support for subnet router failover
-  [#1024](https://github.com/juanfont/headscale/pull/1024)
-- Added an OIDC AllowGroups Configuration options and authorization check
-  [#1041](https://github.com/juanfont/headscale/pull/1041)
-- Set `db_ssl` to false by default
-  [#1052](https://github.com/juanfont/headscale/pull/1052)
-- Fix duplicate nodes due to incorrect implementation of the protocol
-  [#1058](https://github.com/juanfont/headscale/pull/1058)
-- Report if a machine is online in CLI more accurately
-  [#1062](https://github.com/juanfont/headscale/pull/1062)
-- Added config option for custom DNS records
-  [#1035](https://github.com/juanfont/headscale/pull/1035)
-- Expire nodes based on OIDC token expiry
-  [#1067](https://github.com/juanfont/headscale/pull/1067)
-- Remove ephemeral nodes on logout
-  [#1098](https://github.com/juanfont/headscale/pull/1098)
-- Performance improvements in ACLs
-  [#1129](https://github.com/juanfont/headscale/pull/1129)
-- OIDC client secret can be passed via a file
-  [#1127](https://github.com/juanfont/headscale/pull/1127)
+- Reworked routing and added support for subnet router failover [#1024](https://github.com/juanfont/headscale/pull/1024)
+- Added an OIDC AllowGroups Configuration options and authorization check [#1041](https://github.com/juanfont/headscale/pull/1041)
+- Set `db_ssl` to false by default [#1052](https://github.com/juanfont/headscale/pull/1052)
+- Fix duplicate nodes due to incorrect implementation of the protocol [#1058](https://github.com/juanfont/headscale/pull/1058)
+- Report if a machine is online in CLI more accurately [#1062](https://github.com/juanfont/headscale/pull/1062)
+- Added config option for custom DNS records [#1035](https://github.com/juanfont/headscale/pull/1035)
+- Expire nodes based on OIDC token expiry [#1067](https://github.com/juanfont/headscale/pull/1067)
+- Remove ephemeral nodes on logout [#1098](https://github.com/juanfont/headscale/pull/1098)
+- Performance improvements in ACLs [#1129](https://github.com/juanfont/headscale/pull/1129)
+- OIDC client secret can be passed via a file [#1127](https://github.com/juanfont/headscale/pull/1127)
 
 ## 0.17.1 (2022-12-05)
 
 ### Changes
 
-- Correct typo on macOS standalone profile link
-  [#1028](https://github.com/juanfont/headscale/pull/1028)
-- Update platform docs with Fast User Switching
-  [#1016](https://github.com/juanfont/headscale/pull/1016)
+- Correct typo on macOS standalone profile link [#1028](https://github.com/juanfont/headscale/pull/1028)
+- Update platform docs with Fast User Switching [#1016](https://github.com/juanfont/headscale/pull/1016)
 
 ## 0.17.0 (2022-11-26)
 
@@ -711,15 +1317,13 @@ part of adopting [#1460](https://github.com/juanfont/headscale/pull/1460).
   protocol.
 - Log level option `log_level` was moved to a distinct `log` config section and
   renamed to `level` [#768](https://github.com/juanfont/headscale/pull/768)
-- Removed Alpine Linux container image
-  [#962](https://github.com/juanfont/headscale/pull/962)
+- Removed Alpine Linux container image [#962](https://github.com/juanfont/headscale/pull/962)
 
 ### Important Changes
 
-- Added support for Tailscale TS2021 protocol
-  [#738](https://github.com/juanfont/headscale/pull/738)
+- Added support for Tailscale TS2021 protocol [#738](https://github.com/juanfont/headscale/pull/738)
 - Add experimental support for
-  [SSH ACL](https://tailscale.com/kb/1018/acls/#tailscale-ssh) (see docs for
+  [SSH ACL](https://tailscale.com/docs/reference/syntax/policy-file#tailscale-ssh) (see docs for
   limitations) [#847](https://github.com/juanfont/headscale/pull/847)
   - Please note that this support should be considered _partially_ implemented
   - SSH ACLs status:
@@ -737,81 +1341,57 @@ part of adopting [#1460](https://github.com/juanfont/headscale/pull/1460).
 
 ### Changes
 
-- Add ability to specify config location via env var `HEADSCALE_CONFIG`
-  [#674](https://github.com/juanfont/headscale/issues/674)
-- Target Go 1.19 for Headscale
-  [#778](https://github.com/juanfont/headscale/pull/778)
-- Target Tailscale v1.30.0 to build Headscale
-  [#780](https://github.com/juanfont/headscale/pull/780)
+- Add ability to specify config location via env var `HEADSCALE_CONFIG` [#674](https://github.com/juanfont/headscale/issues/674)
+- Target Go 1.19 for Headscale [#778](https://github.com/juanfont/headscale/pull/778)
+- Target Tailscale v1.30.0 to build Headscale [#780](https://github.com/juanfont/headscale/pull/780)
 - Give a warning when running Headscale with reverse proxy improperly configured
   for WebSockets [#788](https://github.com/juanfont/headscale/pull/788)
-- Fix subnet routers with Primary Routes
-  [#811](https://github.com/juanfont/headscale/pull/811)
-- Added support for JSON logs
-  [#653](https://github.com/juanfont/headscale/issues/653)
-- Sanitise the node key passed to registration url
-  [#823](https://github.com/juanfont/headscale/pull/823)
-- Add support for generating pre-auth keys with tags
-  [#767](https://github.com/juanfont/headscale/pull/767)
+- Fix subnet routers with Primary Routes [#811](https://github.com/juanfont/headscale/pull/811)
+- Added support for JSON logs [#653](https://github.com/juanfont/headscale/issues/653)
+- Sanitise the node key passed to registration url [#823](https://github.com/juanfont/headscale/pull/823)
+- Add support for generating pre-auth keys with tags [#767](https://github.com/juanfont/headscale/pull/767)
 - Add support for evaluating `autoApprovers` ACL entries when a machine is
   registered [#763](https://github.com/juanfont/headscale/pull/763)
-- Add config flag to allow Headscale to start if OIDC provider is down
-  [#829](https://github.com/juanfont/headscale/pull/829)
-- Fix prefix length comparison bug in AutoApprovers route evaluation
-  [#862](https://github.com/juanfont/headscale/pull/862)
-- Random node DNS suffix only applied if names collide in namespace.
-  [#766](https://github.com/juanfont/headscale/issues/766)
-- Remove `ip_prefix` configuration option and warning
-  [#899](https://github.com/juanfont/headscale/pull/899)
-- Add `dns_config.override_local_dns` option
-  [#905](https://github.com/juanfont/headscale/pull/905)
-- Fix some DNS config issues
-  [#660](https://github.com/juanfont/headscale/issues/660)
-- Make it possible to disable TS2019 with build flag
-  [#928](https://github.com/juanfont/headscale/pull/928)
-- Fix OIDC registration issues
-  [#960](https://github.com/juanfont/headscale/pull/960) and
+- Add config flag to allow Headscale to start if OIDC provider is down [#829](https://github.com/juanfont/headscale/pull/829)
+- Fix prefix length comparison bug in AutoApprovers route evaluation [#862](https://github.com/juanfont/headscale/pull/862)
+- Random node DNS suffix only applied if names collide in namespace. [#766](https://github.com/juanfont/headscale/issues/766)
+- Remove `ip_prefix` configuration option and warning [#899](https://github.com/juanfont/headscale/pull/899)
+- Add `dns_config.override_local_dns` option [#905](https://github.com/juanfont/headscale/pull/905)
+- Fix some DNS config issues [#660](https://github.com/juanfont/headscale/issues/660)
+- Make it possible to disable TS2019 with build flag [#928](https://github.com/juanfont/headscale/pull/928)
+- Fix OIDC registration issues [#960](https://github.com/juanfont/headscale/pull/960) and
   [#971](https://github.com/juanfont/headscale/pull/971)
-- Add support for specifying NextDNS DNS-over-HTTPS resolver
-  [#940](https://github.com/juanfont/headscale/pull/940)
-- Make more sslmode available for postgresql connection
-  [#927](https://github.com/juanfont/headscale/pull/927)
+- Add support for specifying NextDNS DNS-over-HTTPS resolver [#940](https://github.com/juanfont/headscale/pull/940)
+- Make more sslmode available for postgresql connection [#927](https://github.com/juanfont/headscale/pull/927)
 
 ## 0.16.4 (2022-08-21)
 
 ### Changes
 
-- Add ability to connect to PostgreSQL over TLS/SSL
-  [#745](https://github.com/juanfont/headscale/pull/745)
-- Fix CLI registration of expired machines
-  [#754](https://github.com/juanfont/headscale/pull/754)
+- Add ability to connect to PostgreSQL over TLS/SSL [#745](https://github.com/juanfont/headscale/pull/745)
+- Fix CLI registration of expired machines [#754](https://github.com/juanfont/headscale/pull/754)
 
 ## 0.16.3 (2022-08-17)
 
 ### Changes
 
-- Fix issue with OIDC authentication
-  [#747](https://github.com/juanfont/headscale/pull/747)
+- Fix issue with OIDC authentication [#747](https://github.com/juanfont/headscale/pull/747)
 
 ## 0.16.2 (2022-08-14)
 
 ### Changes
 
-- Fixed bugs in the client registration process after migration to NodeKey
-  [#735](https://github.com/juanfont/headscale/pull/735)
+- Fixed bugs in the client registration process after migration to NodeKey [#735](https://github.com/juanfont/headscale/pull/735)
 
 ## 0.16.1 (2022-08-12)
 
 ### Changes
 
-- Updated dependencies (including the library that lacked armhf support)
-  [#722](https://github.com/juanfont/headscale/pull/722)
-- Fix missing group expansion in function `excludeCorrectlyTaggedNodes`
-  [#563](https://github.com/juanfont/headscale/issues/563)
+- Updated dependencies (including the library that lacked armhf support) [#722](https://github.com/juanfont/headscale/pull/722)
+- Fix missing group expansion in function `excludeCorrectlyTaggedNodes` [#563](https://github.com/juanfont/headscale/issues/563)
 - Improve registration protocol implementation and switch to NodeKey as main
   identifier [#725](https://github.com/juanfont/headscale/pull/725)
-- Add ability to connect to PostgreSQL via unix socket
-  [#734](https://github.com/juanfont/headscale/pull/734)
+- Add ability to connect to PostgreSQL via unix socket [#734](https://github.com/juanfont/headscale/pull/734)
 
 ## 0.16.0 (2022-07-25)
 
@@ -820,68 +1400,49 @@ part of adopting [#1460](https://github.com/juanfont/headscale/pull/1460).
 ### BREAKING
 
 - Old ACL syntax is no longer supported ("users" & "ports" -> "src" & "dst").
-  Please check [the new syntax](https://tailscale.com/kb/1018/acls/).
+  Please check [the new syntax](https://tailscale.com/docs/features/access-control/acls).
 
 ### Changes
 
-- **Drop** armhf (32-bit ARM) support.
-  [#609](https://github.com/juanfont/headscale/pull/609)
-- Headscale fails to serve if the ACL policy file cannot be parsed
-  [#537](https://github.com/juanfont/headscale/pull/537)
-- Fix labels cardinality error when registering unknown pre-auth key
-  [#519](https://github.com/juanfont/headscale/pull/519)
-- Fix send on closed channel crash in polling
-  [#542](https://github.com/juanfont/headscale/pull/542)
-- Fixed spurious calls to setLastStateChangeToNow from ephemeral nodes
-  [#566](https://github.com/juanfont/headscale/pull/566)
-- Add command for moving nodes between namespaces
-  [#362](https://github.com/juanfont/headscale/issues/362)
+- **Drop** armhf (32-bit ARM) support. [#609](https://github.com/juanfont/headscale/pull/609)
+- Headscale fails to serve if the ACL policy file cannot be parsed [#537](https://github.com/juanfont/headscale/pull/537)
+- Fix labels cardinality error when registering unknown pre-auth key [#519](https://github.com/juanfont/headscale/pull/519)
+- Fix send on closed channel crash in polling [#542](https://github.com/juanfont/headscale/pull/542)
+- Fixed spurious calls to setLastStateChangeToNow from ephemeral nodes [#566](https://github.com/juanfont/headscale/pull/566)
+- Add command for moving nodes between namespaces [#362](https://github.com/juanfont/headscale/issues/362)
 - Added more configuration parameters for OpenID Connect (scopes, free-form
   parameters, domain and user allowlist)
-- Add command to set tags on a node
-  [#525](https://github.com/juanfont/headscale/issues/525)
-- Add command to view tags of nodes
-  [#356](https://github.com/juanfont/headscale/issues/356)
-- Add --all (-a) flag to enable routes command
-  [#360](https://github.com/juanfont/headscale/issues/360)
-- Fix issue where nodes was not updated across namespaces
-  [#560](https://github.com/juanfont/headscale/pull/560)
-- Add the ability to rename a nodes name
-  [#560](https://github.com/juanfont/headscale/pull/560)
+- Add command to set tags on a node [#525](https://github.com/juanfont/headscale/issues/525)
+- Add command to view tags of nodes [#356](https://github.com/juanfont/headscale/issues/356)
+- Add --all (-a) flag to enable routes command [#360](https://github.com/juanfont/headscale/issues/360)
+- Fix issue where nodes was not updated across namespaces [#560](https://github.com/juanfont/headscale/pull/560)
+- Add the ability to rename a nodes name [#560](https://github.com/juanfont/headscale/pull/560)
   - Node DNS names are now unique, a random suffix will be added when a node
     joins
   - This change contains database changes, remember to **backup** your database
     before upgrading
-- Add option to enable/disable logtail (Tailscale's logging infrastructure)
-  [#596](https://github.com/juanfont/headscale/pull/596)
+- Add option to enable/disable logtail (Tailscale's logging infrastructure) [#596](https://github.com/juanfont/headscale/pull/596)
   - This change disables the logs by default
 - Use [Prometheus]'s duration parser, supporting days (`d`), weeks (`w`) and
   years (`y`) [#598](https://github.com/juanfont/headscale/pull/598)
-- Add support for reloading ACLs with SIGHUP
-  [#601](https://github.com/juanfont/headscale/pull/601)
+- Add support for reloading ACLs with SIGHUP [#601](https://github.com/juanfont/headscale/pull/601)
 - Use new ACL syntax [#618](https://github.com/juanfont/headscale/pull/618)
-- Add -c option to specify config file from command line
-  [#285](https://github.com/juanfont/headscale/issues/285)
+- Add -c option to specify config file from command line [#285](https://github.com/juanfont/headscale/issues/285)
   [#612](https://github.com/juanfont/headscale/pull/601)
 - Add configuration option to allow Tailscale clients to use a random WireGuard
-  port. [kb/1181/firewalls](https://tailscale.com/kb/1181/firewalls)
+  port. [Tailscale docs](https://tailscale.com/docs/reference/syntax/policy-file#randomizeclientport)
   [#624](https://github.com/juanfont/headscale/pull/624)
 - Improve obtuse UX regarding missing configuration
   (`ephemeral_node_inactivity_timeout` not set)
   [#639](https://github.com/juanfont/headscale/pull/639)
-- Fix nodes being shown as 'offline' in `tailscale status`
-  [#648](https://github.com/juanfont/headscale/pull/648)
-- Improve shutdown behaviour
-  [#651](https://github.com/juanfont/headscale/pull/651)
+- Fix nodes being shown as 'offline' in `tailscale status` [#648](https://github.com/juanfont/headscale/pull/648)
+- Improve shutdown behaviour [#651](https://github.com/juanfont/headscale/pull/651)
 - Drop Gin as web framework in Headscale
   [648](https://github.com/juanfont/headscale/pull/648)
   [677](https://github.com/juanfont/headscale/pull/677)
-- Make tailnet node updates check interval configurable
-  [#675](https://github.com/juanfont/headscale/pull/675)
-- Fix regression with HTTP API
-  [#684](https://github.com/juanfont/headscale/pull/684)
-- nodes ls now print both Hostname and Name(Issue
-  [#647](https://github.com/juanfont/headscale/issues/647) PR
+- Make tailnet node updates check interval configurable [#675](https://github.com/juanfont/headscale/pull/675)
+- Fix regression with HTTP API [#684](https://github.com/juanfont/headscale/pull/684)
+- nodes ls now print both Hostname and Name(Issue [#647](https://github.com/juanfont/headscale/issues/647) PR
   [#687](https://github.com/juanfont/headscale/pull/687))
 
 ## 0.15.0 (2022-03-20)
@@ -893,8 +1454,7 @@ part of adopting [#1460](https://github.com/juanfont/headscale/pull/1460).
 - Boundaries between Namespaces has been removed and all nodes can communicate
   by default [#357](https://github.com/juanfont/headscale/pull/357)
   - To limit access between nodes, use [ACLs](./docs/ref/acls.md).
-- `/metrics` is now a configurable host:port endpoint:
-  [#344](https://github.com/juanfont/headscale/pull/344). You must update your
+- `/metrics` is now a configurable host:port endpoint: [#344](https://github.com/juanfont/headscale/pull/344). You must update your
   `config.yaml` file to include:
   ```yaml
   metrics_listen_addr: 127.0.0.1:9090
@@ -902,23 +1462,18 @@ part of adopting [#1460](https://github.com/juanfont/headscale/pull/1460).
 
 ### Features
 
-- Add support for writing ACL files with YAML
-  [#359](https://github.com/juanfont/headscale/pull/359)
-- Users can now use emails in ACL's groups
-  [#372](https://github.com/juanfont/headscale/issues/372)
-- Add shorthand aliases for commands and subcommands
-  [#376](https://github.com/juanfont/headscale/pull/376)
+- Add support for writing ACL files with YAML [#359](https://github.com/juanfont/headscale/pull/359)
+- Users can now use emails in ACL's groups [#372](https://github.com/juanfont/headscale/issues/372)
+- Add shorthand aliases for commands and subcommands [#376](https://github.com/juanfont/headscale/pull/376)
 - Add `/windows` endpoint for Windows configuration instructions + registry file
   download [#392](https://github.com/juanfont/headscale/pull/392)
-- Added embedded DERP (and STUN) server into Headscale
-  [#388](https://github.com/juanfont/headscale/pull/388)
+- Added embedded DERP (and STUN) server into Headscale [#388](https://github.com/juanfont/headscale/pull/388)
 
 ### Changes
 
 - Fix a bug were the same IP could be assigned to multiple hosts if joined in
   quick succession [#346](https://github.com/juanfont/headscale/pull/346)
-- Simplify the code behind registration of machines
-  [#366](https://github.com/juanfont/headscale/pull/366)
+- Simplify the code behind registration of machines [#366](https://github.com/juanfont/headscale/pull/366)
   - Nodes are now only written to database if they are registered successfully
 - Fix a limitation in the ACLs that prevented users to write rules with `*` as
   source [#374](https://github.com/juanfont/headscale/issues/374)
@@ -927,8 +1482,7 @@ part of adopting [#1460](https://github.com/juanfont/headscale/pull/1460).
   [#371](https://github.com/juanfont/headscale/pull/371)
 - Apply normalization function to FQDN on hostnames when hosts registers and
   retrieve information [#363](https://github.com/juanfont/headscale/issues/363)
-- Fix a bug that prevented the use of `tailscale logout` with OIDC
-  [#508](https://github.com/juanfont/headscale/issues/508)
+- Fix a bug that prevented the use of `tailscale logout` with OIDC [#508](https://github.com/juanfont/headscale/issues/508)
 - Added Tailscale repo HEAD and unstable releases channel to the integration
   tests targets [#513](https://github.com/juanfont/headscale/pull/513)
 
@@ -955,13 +1509,11 @@ behaviour.
 
 ### Features
 
-- Add support for configurable mTLS [docs](./docs/ref/tls.md)
-  [#297](https://github.com/juanfont/headscale/pull/297)
+- Add support for configurable mTLS [docs](./docs/ref/tls.md) [#297](https://github.com/juanfont/headscale/pull/297)
 
 ### Changes
 
-- Remove dependency on CGO (switch from CGO SQLite to pure Go)
-  [#346](https://github.com/juanfont/headscale/pull/346)
+- Remove dependency on CGO (switch from CGO SQLite to pure Go) [#346](https://github.com/juanfont/headscale/pull/346)
 
 **0.13.0 (2022-02-18):**
 
@@ -970,7 +1522,7 @@ behaviour.
 - Add IPv6 support to the prefix assigned to namespaces
 - Add API Key support
   - Enable remote control of `headscale` via CLI
-    [docs](./docs/ref/remote-cli.md)
+    [docs](./docs/ref/api.md#grpc)
   - Enable HTTP API (beta, subject to change)
 - OpenID Connect users will be mapped per namespaces
   - Each user will get its own namespace, created if it does not exist
@@ -980,25 +1532,18 @@ behaviour.
 
 ### Changes
 
-- `ip_prefix` is now superseded by `ip_prefixes` in the configuration
-  [#208](https://github.com/juanfont/headscale/pull/208)
-- Upgrade `tailscale` (1.20.4) and other dependencies to latest
-  [#314](https://github.com/juanfont/headscale/pull/314)
-- fix swapped machine<->namespace labels in `/metrics`
-  [#312](https://github.com/juanfont/headscale/pull/312)
-- remove key-value based update mechanism for namespace changes
-  [#316](https://github.com/juanfont/headscale/pull/316)
+- `ip_prefix` is now superseded by `ip_prefixes` in the configuration [#208](https://github.com/juanfont/headscale/pull/208)
+- Upgrade `tailscale` (1.20.4) and other dependencies to latest [#314](https://github.com/juanfont/headscale/pull/314)
+- fix swapped machine<->namespace labels in `/metrics` [#312](https://github.com/juanfont/headscale/pull/312)
+- remove key-value based update mechanism for namespace changes [#316](https://github.com/juanfont/headscale/pull/316)
 
 **0.12.4 (2022-01-29):**
 
 ### Changes
 
-- Make gRPC Unix Socket permissions configurable
-  [#292](https://github.com/juanfont/headscale/pull/292)
-- Trim whitespace before reading Private Key from file
-  [#289](https://github.com/juanfont/headscale/pull/289)
-- Add new command to generate a private key for `headscale`
-  [#290](https://github.com/juanfont/headscale/pull/290)
+- Make gRPC Unix Socket permissions configurable [#292](https://github.com/juanfont/headscale/pull/292)
+- Trim whitespace before reading Private Key from file [#289](https://github.com/juanfont/headscale/pull/289)
+- Add new command to generate a private key for `headscale` [#290](https://github.com/juanfont/headscale/pull/290)
 - Fixed issue where hosts deleted from control server may be written back to the
   database, as long as they are connected to the control server
   [#278](https://github.com/juanfont/headscale/pull/278)
@@ -1008,8 +1553,7 @@ behaviour.
 ### Changes
 
 - Added Alpine container [#270](https://github.com/juanfont/headscale/pull/270)
-- Minor updates in dependencies
-  [#271](https://github.com/juanfont/headscale/pull/271)
+- Minor updates in dependencies [#271](https://github.com/juanfont/headscale/pull/271)
 
 ## 0.12.2 (2022-01-11)
 
@@ -1028,8 +1572,7 @@ tagging)
 
 ### BREAKING
 
-- Upgrade to Tailscale 1.18
-  [#229](https://github.com/juanfont/headscale/pull/229)
+- Upgrade to Tailscale 1.18 [#229](https://github.com/juanfont/headscale/pull/229)
   - This change requires a new format for private key, private keys are now
     generated automatically:
     1. Delete your current key
@@ -1038,25 +1581,19 @@ tagging)
 
 ### Changes
 
-- Unify configuration example
-  [#197](https://github.com/juanfont/headscale/pull/197)
-- Add stricter linting and formatting
-  [#223](https://github.com/juanfont/headscale/pull/223)
+- Unify configuration example [#197](https://github.com/juanfont/headscale/pull/197)
+- Add stricter linting and formatting [#223](https://github.com/juanfont/headscale/pull/223)
 
 ### Features
 
-- Add gRPC and HTTP API (HTTP API is currently disabled)
-  [#204](https://github.com/juanfont/headscale/pull/204)
-- Use gRPC between the CLI and the server
-  [#206](https://github.com/juanfont/headscale/pull/206),
+- Add gRPC and HTTP API (HTTP API is currently disabled) [#204](https://github.com/juanfont/headscale/pull/204)
+- Use gRPC between the CLI and the server [#206](https://github.com/juanfont/headscale/pull/206),
   [#212](https://github.com/juanfont/headscale/pull/212)
-- Beta OpenID Connect support
-  [#126](https://github.com/juanfont/headscale/pull/126),
+- Beta OpenID Connect support [#126](https://github.com/juanfont/headscale/pull/126),
   [#227](https://github.com/juanfont/headscale/pull/227)
 
 ## 0.11.0 (2021-10-25)
 
 ### BREAKING
 
-- Make headscale fetch DERP map from URL and file
-  [#196](https://github.com/juanfont/headscale/pull/196)
+- Make headscale fetch DERP map from URL and file [#196](https://github.com/juanfont/headscale/pull/196)

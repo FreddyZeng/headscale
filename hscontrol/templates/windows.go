@@ -1,39 +1,21 @@
 package templates
 
 import (
-	"fmt"
-
 	"github.com/chasefleming/elem-go"
-	"github.com/chasefleming/elem-go/attrs"
 )
 
 func Windows(url string) *elem.Element {
-	return HtmlStructure(
-		elem.Title(nil,
-			elem.Text("headscale - Windows"),
+	return page(
+		"headscale - Windows",
+		H1(elem.Text("Windows configuration")),
+		P(
+			elem.Text("Download "),
+			externalLink("https://tailscale.com/download/windows", "Tailscale for Windows"),
+			elem.Text(" and install it."),
 		),
-		elem.Body(attrs.Props{
-			attrs.Style: bodyStyle.ToInline(),
-		},
-			headerOne("headscale: Windows configuration"),
-			elem.P(nil,
-				elem.Text("Download "),
-				elem.A(attrs.Props{
-					attrs.Href:   "https://tailscale.com/download/windows",
-					attrs.Rel:    "noreferrer noopener",
-					attrs.Target: "_blank",
-				},
-					elem.Text("Tailscale for Windows ")),
-				elem.Text("and install it."),
-			),
-			elem.P(nil,
-				elem.Text("Open a Command Prompt or Powershell and use Tailscale's login command to connect with headscale: "),
-			),
-			elem.Pre(nil,
-				elem.Code(nil,
-					elem.Text(fmt.Sprintf(`tailscale login --login-server %s`, url)),
-				),
-			),
+		P(
+			elem.Text("Open a Command Prompt or PowerShell and use Tailscale's login command to connect with headscale:"),
 		),
+		codeBlockText("tailscale login --login-server "+url),
 	)
 }

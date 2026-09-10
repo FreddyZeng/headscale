@@ -3,6 +3,8 @@ package db
 import (
 	"errors"
 	"fmt"
+	"strconv"
+	"testing"
 
 	"github.com/juanfont/headscale/hscontrol/types"
 	"github.com/juanfont/headscale/hscontrol/util"
@@ -13,6 +15,7 @@ var (
 	ErrUserExists        = errors.New("user already exists")
 	ErrUserNotFound      = errors.New("user not found")
 	ErrUserStillHasNodes = errors.New("user not empty: node(s) found")
+	ErrUserNotUnique     = errors.New("expected exactly one user")
 )
 
 func (hsdb *HSDatabase) CreateUser(user types.User) (*types.User, error) {
@@ -21,14 +24,16 @@ func (hsdb *HSDatabase) CreateUser(user types.User) (*types.User, error) {
 	})
 }
 
-// CreateUser creates a new User. Returns error if could not be created
+// CreateUser creates a new [types.User]. Returns error if could not be created
 // or another user already exists.
 func CreateUser(tx *gorm.DB, user types.User) (*types.User, error) {
 	err := util.ValidateUsername(user.Name)
 	if err != nil {
 		return nil, err
 	}
-	if err := tx.Create(&user).Error; err != nil {
+
+	err = tx.Create(&user).Error
+	if err != nil {
 		return nil, fmt.Errorf("creating user: %w", err)
 	}
 
@@ -41,8 +46,9 @@ func (hsdb *HSDatabase) DestroyUser(uid types.UserID) error {
 	})
 }
 
-// DestroyUser destroys a User. Returns error if the User does
-// not exist or if there are nodes associated with it.
+// DestroyUser destroys a [types.User]. Returns error if the [types.User] does
+// not exist or if there are user-owned nodes associated with it.
+// Tagged nodes have user_id = NULL so they do not block deletion.
 func DestroyUser(tx *gorm.DB, uid types.UserID) error {
 	user, err := GetUserByID(tx, uid)
 	if err != nil {
@@ -53,6 +59,7 @@ func DestroyUser(tx *gorm.DB, uid types.UserID) error {
 	if err != nil {
 		return err
 	}
+
 	if len(nodes) > 0 {
 		return ErrUserStillHasNodes
 	}
@@ -61,8 +68,9 @@ func DestroyUser(tx *gorm.DB, uid types.UserID) error {
 	if err != nil {
 		return err
 	}
+
 	for _, key := range keys {
-		err = DestroyPreAuthKey(tx, key)
+		err = DestroyPreAuthKey(tx, key.ID)
 		if err != nil {
 			return err
 		}
@@ -83,16 +91,15 @@ func (hsdb *HSDatabase) RenameUser(uid types.UserID, newName string) error {
 
 var ErrCannotChangeOIDCUser = errors.New("cannot edit OIDC user")
 
-// RenameUser renames a User. Returns error if the User does
-// not exist or if another User exists with the new name.
+// RenameUser renames a [types.User]. Returns error if the [types.User] does
+// not exist or if another [types.User] exists with the new name.
 func RenameUser(tx *gorm.DB, uid types.UserID, newName string) error {
-	var err error
 	oldUser, err := GetUserByID(tx, uid)
 	if err != nil {
 		return err
 	}
-	err = util.ValidateUsername(newName)
-	if err != nil {
+
+	if err = util.ValidateUsername(newName); err != nil { //nolint:noinlineerr
 		return err
 	}
 
@@ -102,7 +109,8 @@ func RenameUser(tx *gorm.DB, uid types.UserID, newName string) error {
 
 	oldUser.Name = newName
 
-	if err := tx.Save(&oldUser).Error; err != nil {
+	err = tx.Updates(&oldUser).Error
+	if err != nil {
 		return err
 	}
 
@@ -110,9 +118,7 @@ func RenameUser(tx *gorm.DB, uid types.UserID, newName string) error {
 }
 
 func (hsdb *HSDatabase) GetUserByID(uid types.UserID) (*types.User, error) {
-	return Read(hsdb.DB, func(rx *gorm.DB) (*types.User, error) {
-		return GetUserByID(rx, uid)
-	})
+	return GetUserByID(hsdb.DB, uid)
 }
 
 func GetUserByID(tx *gorm.DB, uid types.UserID) (*types.User, error) {
@@ -145,25 +151,16 @@ func GetUserByOIDCIdentifier(tx *gorm.DB, id string) (*types.User, error) {
 	return &user, nil
 }
 
-func (hsdb *HSDatabase) ListUsers(where ...*types.User) ([]types.User, error) {
-	return Read(hsdb.DB, func(rx *gorm.DB) ([]types.User, error) {
-		return ListUsers(rx, where...)
-	})
+func (hsdb *HSDatabase) ListUsers(filter *types.User) ([]types.User, error) {
+	return ListUsers(hsdb.DB, filter)
 }
 
-// ListUsers gets all the existing users.
-func ListUsers(tx *gorm.DB, where ...*types.User) ([]types.User, error) {
-	if len(where) > 1 {
-		return nil, fmt.Errorf("expect 0 or 1 where User structs, got %d", len(where))
-	}
-
-	var user *types.User
-	if len(where) == 1 {
-		user = where[0]
-	}
-
+// ListUsers gets all the existing users, optionally filtered by a non-nil filter.
+func ListUsers(tx *gorm.DB, filter *types.User) ([]types.User, error) {
 	users := []types.User{}
-	if err := tx.Where(user).Find(&users).Error; err != nil {
+
+	err := tx.Where(filter).Find(&users).Error
+	if err != nil {
 		return nil, err
 	}
 
@@ -183,7 +180,7 @@ func (hsdb *HSDatabase) GetUserByName(name string) (*types.User, error) {
 	}
 
 	if len(users) != 1 {
-		return nil, fmt.Errorf("expected exactly one user, found %d", len(users))
+		return nil, fmt.Errorf("%w, found %d", ErrUserNotUnique, len(users))
 	}
 
 	return &users[0], nil
@@ -192,29 +189,44 @@ func (hsdb *HSDatabase) GetUserByName(name string) (*types.User, error) {
 // ListNodesByUser gets all the nodes in a given user.
 func ListNodesByUser(tx *gorm.DB, uid types.UserID) (types.Nodes, error) {
 	nodes := types.Nodes{}
-	if err := tx.Preload("AuthKey").Preload("AuthKey.User").Preload("User").Where(&types.Node{UserID: uint(uid)}).Find(&nodes).Error; err != nil {
+
+	uidPtr := uint(uid)
+
+	err := preloadNode(tx).Where(&types.Node{UserID: &uidPtr}).Find(&nodes).Error
+	if err != nil {
 		return nil, err
 	}
 
 	return nodes, nil
 }
 
-func (hsdb *HSDatabase) AssignNodeToUser(node *types.Node, uid types.UserID) error {
-	return hsdb.Write(func(tx *gorm.DB) error {
-		return AssignNodeToUser(tx, node, uid)
-	})
+func (hsdb *HSDatabase) CreateUserForTest(name ...string) *types.User {
+	if !testing.Testing() {
+		panic("CreateUserForTest can only be called during tests")
+	}
+
+	userName := firstOr("testuser", name)
+
+	user, err := hsdb.CreateUser(types.User{Name: userName})
+	if err != nil {
+		panic(fmt.Sprintf("failed to create test user: %v", err))
+	}
+
+	return user
 }
 
-// AssignNodeToUser assigns a Node to a user.
-func AssignNodeToUser(tx *gorm.DB, node *types.Node, uid types.UserID) error {
-	user, err := GetUserByID(tx, uid)
-	if err != nil {
-		return err
-	}
-	node.User = *user
-	if result := tx.Save(&node); result.Error != nil {
-		return result.Error
+func (hsdb *HSDatabase) CreateUsersForTest(count int, namePrefix ...string) []*types.User {
+	if !testing.Testing() {
+		panic("CreateUsersForTest can only be called during tests")
 	}
 
-	return nil
+	prefix := firstOr("testuser", namePrefix)
+
+	users := make([]*types.User, count)
+	for i := range count {
+		name := prefix + "-" + strconv.Itoa(i)
+		users[i] = hsdb.CreateUserForTest(name)
+	}
+
+	return users
 }

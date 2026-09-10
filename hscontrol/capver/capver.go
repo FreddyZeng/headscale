@@ -1,68 +1,59 @@
 package capver
 
+//go:generate go run ../../tools/capver/main.go
+
 import (
-	"sort"
+	"maps"
+	"slices"
 	"strings"
 
-	"slices"
-
-	xmaps "golang.org/x/exp/maps"
 	"tailscale.com/tailcfg"
+	"tailscale.com/util/cmpver"
 	"tailscale.com/util/set"
 )
 
-const MinSupportedCapabilityVersion tailcfg.CapabilityVersion = 88
+// minVersionParts is the minimum number of version parts needed for major.minor.
+const minVersionParts = 2
 
-// CanOldCodeBeCleanedUp is intended to be called on startup to see if
-// there are old code that can ble cleaned up, entries should contain
-// a CapVer where something can be cleaned up and a panic if it can.
-// This is only intended to catch things in tests.
+// CanOldCodeBeCleanedUp is called at server startup to panic when
+// [MinSupportedCapabilityVersion] has crossed a threshold at which a
+// backwards-compat emit path can be deleted. Each entry pairs a
+// [tailcfg.CapabilityVersion] threshold with the message identifying
+// the code to remove; today there are none.
 //
-// All uses of Capability version checks should be listed here.
+// All capability-version-gated cleanups should be registered here.
 func CanOldCodeBeCleanedUp() {
-	if MinSupportedCapabilityVersion >= 111 {
-		panic("LegacyDERP can be cleaned up in tail.go")
-	}
 }
 
 func tailscaleVersSorted() []string {
-	vers := xmaps.Keys(tailscaleToCapVer)
-	sort.Strings(vers)
-	return vers
+	return slices.Sorted(maps.Keys(tailscaleToCapVer))
 }
 
-func capVersSorted() []tailcfg.CapabilityVersion {
-	capVers := xmaps.Keys(capVerToTailscaleVer)
-	slices.Sort(capVers)
-	return capVers
-}
-
-// TailscaleVersion returns the Tailscale version for the given CapabilityVersion.
+// TailscaleVersion returns the Tailscale version for the given [tailcfg.CapabilityVersion].
 func TailscaleVersion(ver tailcfg.CapabilityVersion) string {
 	return capVerToTailscaleVer[ver]
 }
 
-// CapabilityVersion returns the CapabilityVersion for the given Tailscale version.
+// CapabilityVersion returns the [tailcfg.CapabilityVersion] for the given Tailscale version.
+// It accepts both full versions (v1.90.1) and minor versions (v1.90).
 func CapabilityVersion(ver string) tailcfg.CapabilityVersion {
 	if !strings.HasPrefix(ver, "v") {
 		ver = "v" + ver
 	}
-	return tailscaleToCapVer[ver]
-}
 
-// TailscaleLatest returns the n latest Tailscale versions.
-func TailscaleLatest(n int) []string {
-	if n <= 0 {
-		return nil
+	// Try direct lookup first (works for minor versions like v1.90)
+	if cv, ok := tailscaleToCapVer[ver]; ok {
+		return cv
 	}
 
-	tsSorted := tailscaleVersSorted()
-
-	if n > len(tsSorted) {
-		return tsSorted
+	// Try extracting minor version from full version (v1.90.1 -> v1.90)
+	parts := strings.Split(strings.TrimPrefix(ver, "v"), ".")
+	if len(parts) >= minVersionParts {
+		minor := "v" + parts[0] + "." + parts[1]
+		return tailscaleToCapVer[minor]
 	}
 
-	return tsSorted[len(tsSorted)-n:]
+	return 0
 }
 
 // TailscaleLatestMajorMinor returns the n latest Tailscale versions (e.g. 1.80).
@@ -72,35 +63,24 @@ func TailscaleLatestMajorMinor(n int, stripV bool) []string {
 	}
 
 	majors := set.Set[string]{}
+
 	for _, vers := range tailscaleVersSorted() {
 		if stripV {
 			vers = strings.TrimPrefix(vers, "v")
 		}
+
 		v := strings.Split(vers, ".")
 		majors.Add(v[0] + "." + v[1])
 	}
 
 	majorSl := majors.Slice()
-	sort.Strings(majorSl)
+	// cmpver orders versions numerically, so v1.100 sorts after v1.98 rather than
+	// lexically before it.
+	slices.SortFunc(majorSl, cmpver.Compare)
 
 	if n > len(majorSl) {
 		return majorSl
 	}
 
 	return majorSl[len(majorSl)-n:]
-}
-
-// CapVerLatest returns the n latest CapabilityVersions.
-func CapVerLatest(n int) []tailcfg.CapabilityVersion {
-	if n <= 0 {
-		return nil
-	}
-
-	s := capVersSorted()
-
-	if n > len(s) {
-		return s
-	}
-
-	return s[len(s)-n:]
 }

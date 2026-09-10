@@ -2,7 +2,7 @@
 
 ## Bring your own certificate
 
-Headscale can be configured to expose its web service via TLS. To configure the certificate and key file manually, set the `tls_cert_path` and `tls_cert_path` configuration parameters. If the path is relative, it will be interpreted as relative to the directory the configuration file was read from.
+Headscale can be configured to expose its web service via TLS. To configure the certificate and key file manually, set the `tls_cert_path` and `tls_key_path` configuration parameters. If the path is relative, it will be interpreted as relative to the directory the configuration file was read from.
 
 ```yaml title="config.yaml"
 tls_cert_path: ""
@@ -50,7 +50,7 @@ Headscale uses [autocert](https://pkg.go.dev/golang.org/x/crypto/acme/autocert),
 If you want to validate that certificate renewal completed successfully, this can be done either manually, or through external monitoring software. Two examples of doing this manually:
 
 1. Open the URL for your headscale server in your browser of choice, and manually inspecting the expiry date of the certificate you receive.
-2. Or, check remotely from CLI using `openssl`:
+1. Or, check remotely from CLI using `openssl`:
 
 ```console
 $ openssl s_client -servername [hostname] -connect [hostname]:443 | openssl x509 -noout -dates

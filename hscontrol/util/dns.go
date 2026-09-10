@@ -4,7 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
-	"regexp"
+	"slices"
+	"strconv"
 	"strings"
 	"unicode"
 
@@ -17,14 +18,20 @@ const (
 	ipv4AddressLength = 32
 	ipv6AddressLength = 128
 
+	// LabelHostnameLength is the maximum length for a DNS label,
 	// value related to RFC 1123 and 952.
 	LabelHostnameLength = 63
 )
 
-var invalidDNSRegex = regexp.MustCompile("[^a-z0-9-.]+")
-var invalidCharsInUserRegex = regexp.MustCompile("[^a-z0-9-.]+")
-
-var ErrInvalidUserName = errors.New("invalid user name")
+// DNS validation errors. Hostname-side validation lives on
+// `tailscale.com/util/dnsname` and [state.NodeStore] collision handling; only
+// the username-side errors stay in this package.
+var (
+	ErrUsernameTooShort        = errors.New("username must be at least 2 characters long")
+	ErrUsernameMustStartLetter = errors.New("username must start with a letter")
+	ErrUsernameTooManyAt       = errors.New("username cannot contain more than one '@'")
+	ErrUsernameInvalidChar     = errors.New("username contains invalid character")
+)
 
 // ValidateUsername checks if a username is valid.
 // It must be at least 2 characters long, start with a letter, and contain
@@ -34,15 +41,16 @@ var ErrInvalidUserName = errors.New("invalid user name")
 func ValidateUsername(username string) error {
 	// Ensure the username meets the minimum length requirement
 	if len(username) < 2 {
-		return errors.New("username must be at least 2 characters long")
+		return ErrUsernameTooShort
 	}
 
-	// Ensure the username does not start with a number
-	if unicode.IsDigit(rune(username[0])) {
-		return errors.New("username cannot start with a number")
+	// Ensure the username starts with a letter
+	if !unicode.IsLetter(rune(username[0])) {
+		return ErrUsernameMustStartLetter
 	}
 
 	atCount := 0
+
 	for _, char := range username {
 		switch {
 		case unicode.IsLetter(char),
@@ -54,60 +62,22 @@ func ValidateUsername(username string) error {
 		case char == '@':
 			atCount++
 			if atCount > 1 {
-				return errors.New("username cannot contain more than one '@'")
+				return ErrUsernameTooManyAt
 			}
 		default:
-			return fmt.Errorf("username contains invalid character: '%c'", char)
+			return fmt.Errorf("%w: '%c'", ErrUsernameInvalidChar, char)
 		}
 	}
 
 	return nil
 }
 
-func CheckForFQDNRules(name string) error {
-	// Ensure the username meets the minimum length requirement
-	if len(name) < 2 {
-		return errors.New("name must be at least 2 characters long")
-	}
-
-	if len(name) > LabelHostnameLength {
-		return fmt.Errorf(
-			"DNS segment must not be over 63 chars. %v doesn't comply with this rule: %w",
-			name,
-			ErrInvalidUserName,
-		)
-	}
-	if strings.ToLower(name) != name {
-		return fmt.Errorf(
-			"DNS segment should be lowercase. %v doesn't comply with this rule: %w",
-			name,
-			ErrInvalidUserName,
-		)
-	}
-	if invalidDNSRegex.MatchString(name) {
-		return fmt.Errorf(
-			"DNS segment should only be composed of lowercase ASCII letters numbers, hyphen and dots. %v doesn't comply with these rules: %w",
-			name,
-			ErrInvalidUserName,
-		)
-	}
-
-	return nil
-}
-
-func ConvertWithFQDNRules(name string) string {
-	name = strings.ToLower(name)
-	name = invalidDNSRegex.ReplaceAllString(name, "")
-
-	return name
-}
-
-// generateMagicDNSRootDomains generates a list of DNS entries to be included in `Routes` in `MapResponse`.
+// generateMagicDNSRootDomains generates a list of DNS entries to be included in [tailcfg.DNSConfig.Routes] in [tailcfg.MapResponse].
 // This list of reverse DNS entries instructs the OS on what subnets and domains the Tailscale embedded DNS
 // server (listening in 100.100.100.100 udp/53) should be used for.
 //
 // Tailscale.com includes in the list:
-// - the `BaseDomain` of the user
+// - the [types.DNSConfig.BaseDomain] of the user
 // - the reverse DNS entry for IPv6 (0.e.1.a.c.5.1.1.a.7.d.f.ip6.arpa., see below more on IPv6)
 // - the reverse DNS entries for the IPv4 subnets covered by the user's `IPPrefix`.
 //   In the public SaaS this is [64-127].100.in-addr.arpa.
@@ -120,10 +90,11 @@ func ConvertWithFQDNRules(name string) string {
 // and do not make use of RFC2317 ("Classless IN-ADDR.ARPA delegation") - hence generating the entries for the next
 // class block only.
 
+// GenerateIPv4DNSRootDomain generates the IPv4 reverse DNS root domains.
 // From the netmask we can find out the wildcard bits (the bits that are not set in the netmask).
 // This allows us to then calculate the subnets included in the subsequent class block and generate the entries.
 func GenerateIPv4DNSRootDomain(ipPrefix netip.Prefix) []dnsname.FQDN {
-	// Conversion to the std lib net.IPnet, a bit easier to operate
+	// Conversion to the std lib [net.IPNet], a bit easier to operate
 	netRange := netipx.PrefixIPNet(ipPrefix)
 	maskBits, _ := netRange.Mask.Size()
 
@@ -133,49 +104,53 @@ func GenerateIPv4DNSRootDomain(ipPrefix netip.Prefix) []dnsname.FQDN {
 	// wildcardBits is the number of bits not under the mask in the lastOctet
 	wildcardBits := ByteSize - maskBits%ByteSize
 
-	// min is the value in the lastOctet byte of the IP
-	// max is basically 2^wildcardBits - i.e., the value when all the wildcardBits are set to 1
-	min := uint(netRange.IP[lastOctet])
-	max := (min + 1<<uint(wildcardBits)) - 1
+	// A mask covering the full address width (an IPv4 /32) leaves no wildcard
+	// octet, so lastOctet would index past the address. Emit the single
+	// reverse-DNS name for that exact address instead of panicking.
+	if lastOctet >= len(netRange.IP) {
+		rdnsSlice := make([]string, 0, len(netRange.IP)+1)
+		for _, v := range slices.Backward(netRange.IP) {
+			rdnsSlice = append(rdnsSlice, strconv.FormatUint(uint64(v), 10))
+		}
+
+		rdnsSlice = append(rdnsSlice, "in-addr.arpa.")
+
+		fqdn, err := dnsname.ToFQDN(strings.Join(rdnsSlice, "."))
+		if err != nil {
+			return nil
+		}
+
+		return []dnsname.FQDN{fqdn}
+	}
+
+	// minVal is the value in the lastOctet byte of the IP
+	// maxVal is basically 2^wildcardBits - i.e., the value when all the wildcardBits are set to 1
+	minVal := uint(netRange.IP[lastOctet])
+	maxVal := (minVal + 1<<uint(wildcardBits)) - 1 //nolint:gosec // wildcardBits is always < 8, no overflow
 
 	// here we generate the base domain (e.g., 100.in-addr.arpa., 16.172.in-addr.arpa., etc.)
 	rdnsSlice := []string{}
-	for i := lastOctet - 1; i >= 0; i-- {
-		rdnsSlice = append(rdnsSlice, fmt.Sprintf("%d", netRange.IP[i]))
+	for _, b := range slices.Backward(netRange.IP[:lastOctet]) {
+		rdnsSlice = append(rdnsSlice, strconv.FormatUint(uint64(b), 10))
 	}
+
 	rdnsSlice = append(rdnsSlice, "in-addr.arpa.")
 	rdnsBase := strings.Join(rdnsSlice, ".")
 
-	fqdns := make([]dnsname.FQDN, 0, max-min+1)
-	for i := min; i <= max; i++ {
+	fqdns := make([]dnsname.FQDN, 0, maxVal-minVal+1)
+	for i := minVal; i <= maxVal; i++ {
 		fqdn, err := dnsname.ToFQDN(fmt.Sprintf("%d.%s", i, rdnsBase))
 		if err != nil {
 			continue
 		}
+
 		fqdns = append(fqdns, fqdn)
 	}
 
 	return fqdns
 }
 
-// generateMagicDNSRootDomains generates a list of DNS entries to be included in `Routes` in `MapResponse`.
-// This list of reverse DNS entries instructs the OS on what subnets and domains the Tailscale embedded DNS
-// server (listening in 100.100.100.100 udp/53) should be used for.
-//
-// Tailscale.com includes in the list:
-// - the `BaseDomain` of the user
-// - the reverse DNS entry for IPv6 (0.e.1.a.c.5.1.1.a.7.d.f.ip6.arpa., see below more on IPv6)
-// - the reverse DNS entries for the IPv4 subnets covered by the user's `IPPrefix`.
-//   In the public SaaS this is [64-127].100.in-addr.arpa.
-//
-// The main purpose of this function is then generating the list of IPv4 entries. For the 100.64.0.0/10, this
-// is clear, and could be hardcoded. But we are allowing any range as `IPPrefix`, so we need to find out the
-// subnets when we have 172.16.0.0/16 (i.e., [0-255].16.172.in-addr.arpa.), or any other subnet.
-//
-// How IN-ADDR.ARPA domains work is defined in RFC1035 (section 3.5). Tailscale.com seems to adhere to this,
-// and do not make use of RFC2317 ("Classless IN-ADDR.ARPA delegation") - hence generating the entries for the next
-// class block only.
-
+// GenerateIPv6DNSRootDomain generates the IPv6 reverse DNS root domains.
 // From the netmask we can find out the wildcard bits (the bits that are not set in the netmask).
 // This allows us to then calculate the subnets included in the subsequent class block and generate the entries.
 func GenerateIPv6DNSRootDomain(ipPrefix netip.Prefix) []dnsname.FQDN {
@@ -183,44 +158,42 @@ func GenerateIPv6DNSRootDomain(ipPrefix netip.Prefix) []dnsname.FQDN {
 
 	maskBits, _ := netipx.PrefixIPNet(ipPrefix).Mask.Size()
 	expanded := ipPrefix.Addr().StringExpanded()
-	nibbleStr := strings.Map(func(r rune) rune {
-		if r == ':' {
-			return -1
-		}
-
-		return r
-	}, expanded)
+	nibbleStr := strings.ReplaceAll(expanded, ":", "")
 
 	// TODO?: that does not look the most efficient implementation,
 	// but the inputs are not so long as to cause problems,
 	// and from what I can see, the generateMagicDNSRootDomains
 	// function is called only once over the lifetime of a server process.
-	prefixConstantParts := []string{}
+	prefixConstantParts := make([]string, 0, maskBits/nibbleLen)
 	for i := range maskBits / nibbleLen {
-		prefixConstantParts = append(
-			[]string{string(nibbleStr[i])},
-			prefixConstantParts...)
+		prefixConstantParts = append(prefixConstantParts, string(nibbleStr[i]))
 	}
+
+	slices.Reverse(prefixConstantParts)
 
 	makeDomain := func(variablePrefix ...string) (dnsname.FQDN, error) {
 		prefix := strings.Join(append(variablePrefix, prefixConstantParts...), ".")
 
-		return dnsname.ToFQDN(fmt.Sprintf("%s.ip6.arpa", prefix))
+		return dnsname.ToFQDN(prefix + ".ip6.arpa")
 	}
 
 	var fqdns []dnsname.FQDN
+
 	if maskBits%4 == 0 {
 		dom, _ := makeDomain()
 		fqdns = append(fqdns, dom)
 	} else {
 		domCount := 1 << (maskBits % nibbleLen)
+
 		fqdns = make([]dnsname.FQDN, 0, domCount)
 		for i := range domCount {
 			varNibble := fmt.Sprintf("%x", i)
+
 			dom, err := makeDomain(varNibble)
 			if err != nil {
 				continue
 			}
+
 			fqdns = append(fqdns, dom)
 		}
 	}
